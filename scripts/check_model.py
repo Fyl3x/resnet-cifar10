@@ -1,30 +1,20 @@
 import torch
 import numpy as np
 
-from cifar_resnet.model import BasicBlock
-
-test_blk1 = BasicBlock(in_ch=16,out_ch=16,stride=1,residual=True)
-test_blk2 = BasicBlock(in_ch=16,out_ch=32,stride=2,residual=True)
-test_blk3 = BasicBlock(in_ch=32,out_ch=64,stride=2,residual=True)
-test_blk4 = BasicBlock(in_ch=16,out_ch=32,stride=2,residual=False)
-
-test_input1 = torch.randn((2,16,32,32))
-test_input2 = torch.randn((2,16,32,32))
-test_input3 = torch.randn((2,32,16,16))
-test_input4 = torch.randn((2,16,32,32))
+from cifar_resnet.model import ResNetCIFAR
 
 
-print(test_blk1(test_input1).shape)
+resnet3 = ResNetCIFAR(3)
+resenet3_false = ResNetCIFAR(3,residual=False)
 
-print(test_blk2(test_input2).shape)
+print(sum(p.numel() for p in resnet3.parameters()) )
+print(sum(p.numel() for p in resenet3_false.parameters()) )
+input = torch.randn(128,3,32,32)
+output = resnet3(input)
 
-print(test_blk3(test_input3).shape)
+print(output.shape)
 
-print(test_blk4(test_input4).shape)
-
-blk1_params = sum(p.numel() for p in test_blk1.parameters())
-blk2_params = sum(p.numel() for p in test_blk2.parameters())
-blk3_params = sum(p.numel() for p in test_blk3.parameters())
-blk4_params = sum(p.numel() for p in test_blk4.parameters())
-
-print(blk2_params)
+print(resnet3.stem.weight.std())
+print(resnet3.stage3[-1].second_conv.weight.std().item())
+resnet9 = ResNetCIFAR(9)
+print(sum(p.numel() for p in resnet9.parameters()) )
