@@ -26,6 +26,13 @@ def augment(image,rng):
         cropped_image = np.ascontiguousarray(np.flip(cropped_image, axis=1))
     return cropped_image
 
+def preprocess(image,mean):
+    image = image.astype(np.float32)
+    image = image / 255
+    image = image - mean
+    tensored_image = torch.tensor(image)
+    tensored_image = tensored_image.permute(2,0,1).contiguous()
+    return tensored_image
 
 class CIFARDataset(torch.utils.data.Dataset):
     def __init__(self,images,labels,indices,mean,train:bool,seed):
@@ -45,7 +52,5 @@ class CIFARDataset(torch.utils.data.Dataset):
         image, label = self.images[idx], self.labels[idx]
         if self.train:
             image = augment(image=image,rng=self.rng)
-        image = image.astype(np.float32) / 255 - self.mean
-        image = torch.tensor(image)
-        rearranged_image = image.permute(2, 0, 1).contiguous()
-        return rearranged_image,label
+        return preprocess(image, self.mean), label
+    
