@@ -40,7 +40,7 @@ data = torchvision.datasets.CIFAR10(root="data",train=True,download=True)
 
 if args.full:
     train_idx = torch.arange(50000)
-    # mean = np.load("artifacts/pixel_mean_50k.npy")
+    mean = np.load("artifacts/pixel_mean_50k.npy")
     val_loader = None
     val_idx = None
 else:
@@ -65,7 +65,7 @@ loss_fct = nn.CrossEntropyLoss()
 
 print(
     f"Training Set Size = {len(train_idx)} | "
-    f"Validation Set Size = {len(val_idx)} |"
+    f"Validation Set Size = {len(val_idx) if val_idx is not None else "none"} |"
     f"Parameters Count = {sum(p.numel() for p in model.parameters())} | "
 )
 
