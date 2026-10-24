@@ -83,6 +83,6 @@ def save_checkpoint(path,model,optimizer,iteration,seed):
 def load_checkpoint(path,model,optimizer,device):
     checkpoint = torch.load(path,map_location=device)
     model.load_state_dict(checkpoint["model"])
-    if optimizer is not None:
+    if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer'])
     return checkpoint["iteration"], checkpoint["seed"]
