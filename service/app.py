@@ -1,5 +1,10 @@
 from fastapi import FastAPI
 import torch
+from fastapi import UploadFile,HTTPException
+from PIL import Image,UnidentifiedImageError
+from io import BytesIO
+from cifar_resnet.data import preprocess
+
 import numpy as np
 from cifar_resnet.model import ResNetCIFAR
 from cifar_resnet.train import load_checkpoint
@@ -20,3 +25,28 @@ app = FastAPI()
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.post("/predict")
+async def predict_image(file: UploadFile):
+    raw = await file.read()
+    try:
+        img = Image.open(BytesIO(raw)).convert("RGB")
+
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400,detail="Uploaded file is not a valid image")
+    if img.size != (32,32):
+        img = img.resize((32,32))
+    arr = np.asarray(img)
+    x = preprocess(arr,mean=mean).unsqueeze(0)
+    with torch.no_grad():
+        probs = torch.softmax(model(x),dim=1)
+        values,indices = torch.topk(probs,3)
+        result_list = []
+        for value, idx in zip(values[0], indices[0]):
+            result_list.append({
+            "class": class_names[idx.item()],
+            "prob": round(value.item(), 4)
+                                })
+
+    return {"top3": result_list}
+
