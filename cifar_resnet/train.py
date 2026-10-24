@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torchvision
 import os
 def train_step(model,x,y,optimizer,loss_fn):
     optimizer.zero_grad()
