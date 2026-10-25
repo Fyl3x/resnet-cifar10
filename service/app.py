@@ -45,7 +45,7 @@ async def predict_image(file: UploadFile):
         for value, idx in zip(values[0], indices[0]):
             result_list.append({
             "class": class_names[idx.item()],
-            "prob": round(value.item(), 4)
+            "prob": round(value.item(), 6)
                                 })
 
     return {"top3": result_list}
