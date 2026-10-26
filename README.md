@@ -107,6 +107,94 @@ A total of 8,854 out of 10,000 predictions fall into the highest-confidence bin,
 Six of the 20 most confident incorrect predictions involve cats and dogs being misclassified as one another. The first example is labelled as a cat but looks like a frog, suggesting that it may be a labelling error in the dataset rather than a mistake made by the model.
 
 ## Serving
+
+| Endpoint | Input | Output |
+|---|---|---|
+| `GET /health` | – | `{"status": "ok"}` |
+| `POST /predict` | an image file, as multipart form field `file` | the top 3 classes with probabilities |
+
+Example response for `samples/test0.png`:
+
+```json
+{
+  "top3": [
+    {"class": "cat", "prob": 0.9999998807907104},
+    {"class": "dog", "prob": 1.553191140146737e-07},
+    {"class": "frog", "prob": 2.5087427690806408e-09}
+  ]
+}
+```
+
+Probabilities this close to 1 are typical for this model; see the calibration section.
+
+- The API accepts images of any size, converts them to RGB, and resizes them to 32×32 pixels. Large photos lose much of their original detail during resizing, so predictions on them are less reliable than on images similar to those in CIFAR-10.
+
+- If the uploaded file is not a valid image, the API returns HTTP 400 with a clear error message instead of an internal server error.
+
+- The API uses the same preprocess function from data.py as the training pipeline. The model is loaded once at startup and set to evaluation mode, keeping inference consistent with the preprocessing and model behaviour used during training.
+
+
+| Measurement | p50 | p95 |
+|---|---:|---:|
+| Native on Windows (uvicorn, CPU) | 3.9 ms | 7.0 ms |
+| Docker Desktop on Windows (CPU) | 48 ms | 50 ms |
+| Model forward pass alone | 1.4 ms | – |
+
+
+*Measurements were taken over 100 sequential requests from a single client reusing its connection, after 10 warm-up requests, using a 32×32 PNG.*
+
+The extra latency in Docker Desktop is in the request path into the container, not the model; its exact source wasn’t measured.
+
 ## Run it
+
+### Serve with Docker (CPU)
+
+```
+docker build -t resnet-cifar10 .
+docker run --rm -p 8000:8000 resnet-cifar10
+curl -F "file=@samples/test0.png" http://127.0.0.1:8000/predict
+```
+
+An upload form is also available at `http://127.0.0.1:8000/docs`.
+
+### Reproduce training and evaluation (GPU)
+
+Install PyTorch with CUDA from pytorch.org, then:
+
+```
+pip install torchvision numpy matplotlib
+python -m scripts.make_mean_50k
+python -m scripts.train_resnet --name final_res20 --full
+python -m scripts.eval_test --checkpoint artifacts/checkpoints/final_res20.pt --mean artifacts/pixel_mean_50k.npy --name final_res20
+python -m scripts.make_report --name final_res20
+```
+
+Training takes about 36 minutes on an RTX 3050.
+The ablation runs use `--plain` and `--n 9` on the 45k split; see `scripts/train_resnet.py`.
+
+### Tests
+
+```
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt pytest httpx
+python -m pytest
+```
 ## Layout
+
+| Path | Contents |
+|---|---|
+| `cifar_resnet/` | is the core project; it contains the data, model, training and evaluation code |
+| `scripts/` | contains the main entry points for training (`train_resnet.py`), test evaluation (`eval_test.py`), report generation (`make_report.py`) and ablation (`make_ablation.py`), along with the mean files and `check_*.py` development checks |
+| `service/` | has the FastAPI app and its code |
+| `tests/` | has scripts used to test the service: valid image prediction, invalid file rejection and different image sizes |
+| `model/` | has the final ResNet-20 weights and the 50k per-pixel mean used by the service |
+| `docs/figures/` | contains the resulting figures from testing the model and evaluating its metrics |
+| `samples/` | contains the test image used by the automated tests and the README example |
+
 ## Limitations
+
+
+- **Single seed:** All results come from one run using seed 0. Differences of a few tenths of a percentage point may be due to variation between runs rather than a real improvement.
+- **Ablation split:** The four ablation runs used 45k training images instead of the full 50k. Their test error rates are about one percentage point higher than the main result, so the two should not be compared directly.
+- **Container latency:** Docker Desktop on Windows adds around 44 ms of latency compared with native execution. The cause was not investigated further.
+- **Use of AI assistance:** The plotting code was generated with the help of an AI assistant. The rest of the implementation, including the model, initialisation, augmentation, learning-rate schedule, training loop, metrics and prediction service, was written by hand.
