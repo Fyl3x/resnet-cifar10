@@ -1,7 +1,7 @@
 # ResNet-20 on CIFAR-10: reproduced and served
 This project focused on recreating the main architecture of ResNet-20 on the CIFAR-10 dataset, from He et al. 2015 paper called "*Deep Residual Learning for Image Recognition*".
-T
- this was entirely done in PyTorch from scratch meaning hand-written PyTorch, with no model libraries and no pretrained weights; the blocks, the initialisation, the augmentation, the schedule, the training loop and every metric are written by hand.
+
+ This was entirely done in PyTorch from scratch meaning hand-written PyTorch, with no model libraries and no pretrained weights; the blocks, the initialisation, the augmentation, the schedule, the training loop and every metric are written by hand.
 
 Achieved 8.42% test error compared to that of the original paper 8.75% test error, this was also made to be a deployed application using both Docker and FastAPI Service so anyone can use this model and test it themselves.
 
