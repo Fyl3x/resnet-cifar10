@@ -198,3 +198,5 @@ python -m pytest
 - **Ablation split:** The four ablation runs used 45k training images instead of the full 50k. Their test error rates are about one percentage point higher than the main result, so the two should not be compared directly.
 - **Container latency:** Docker Desktop on Windows adds around 44 ms of latency compared with native execution. The cause was not investigated further.
 - **Use of AI assistance:** The plotting code was generated with the help of an AI assistant. The rest of the implementation, including the model, initialisation, augmentation, learning-rate schedule, training loop, metrics and prediction service, was written by hand.
+   The guide in docs/guide/ was drafted with an AI assistant from this repository's code and artifacts, and checked numerically against the trained model.
+   
