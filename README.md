@@ -1,4 +1,6 @@
 # ResNet-20 on CIFAR-10: reproduced and served
+**Full guide:** every tensor shape, formula and gradient, end to end: [docs/guide/resnet20_guide.pdf](docs/guide/resnet20_guide.pdf)
+
 This project focused on recreating the main architecture of ResNet-20 on the CIFAR-10 dataset, from He et al. 2015 paper called "*Deep Residual Learning for Image Recognition*".
 
  This was entirely done in PyTorch from scratch meaning hand-written PyTorch, with no model libraries and no pretrained weights; the blocks, the initialisation, the augmentation, the schedule, the training loop and every metric are written by hand.
@@ -199,4 +201,3 @@ python -m pytest
 - **Container latency:** Docker Desktop on Windows adds around 44 ms of latency compared with native execution. The cause was not investigated further.
 - **Use of AI assistance:** The plotting code was generated with the help of an AI assistant. The rest of the implementation, including the model, initialisation, augmentation, learning-rate schedule, training loop, metrics and prediction service, was written by hand.
    The guide in docs/guide/ was drafted with an AI assistant from this repository's code and artifacts, and checked numerically against the trained model.
-   
