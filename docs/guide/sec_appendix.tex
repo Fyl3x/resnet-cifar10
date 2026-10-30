@@ -1,0 +1,80 @@
+\appendix
+\section{One-page cheat sheet}
+\label{sec:cheat}
+
+\subsection*{Forward shapes for a training batch ($N=128$)}
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+step & operation & shape\\
+\midrule
+raw & \code{data.data[idx]} & \shp{32,32,3} \code{uint8}\\
+augment & pad 4 $\to$ \shp{40,40,3}, crop, flip & \shp{32,32,3} \code{uint8}\\
+preprocess & $/255$, $-\mu$, permute & \shp{3,32,32} \code{float32}\\
+batch & stack & \shp{128,3,32,32}\\
+stem & conv $3{\to}16$ $(3{\times}3,S1,P1)$ + BN + ReLU & \shp{128,16,32,32}\\
+stage 1 & 3 identity blocks & \shp{128,16,32,32}\\
+stage 2 & block $16{\to}32$, $S2$ + 2 identity blocks & \shp{128,32,16,16}\\
+stage 3 & block $32{\to}64$, $S2$ + 2 identity blocks & \shp{128,64,8,8}\\
+GAP & mean over $8{\times}8$ & \shp{128,64,1,1}\\
+flatten & & \shp{128,64}\\
+linear & $pW\T+b$, $W$ \shp{10,64} & \shp{128,10}\\
+loss & CE, mean & scalar\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Formulas}
+\begin{align*}
+&\text{conv output size:} && H_\text{out}=\lfloor (H+2P-K)/S\rfloor+1 \quad(32\to32 \text{ at } S{=}1,\; 32\to16 \text{ at } S{=}2)\\
+&\text{conv params / MACs:} && C_\text{out}C_\text{in}K^2 \;/\; C_\text{out}C_\text{in}K^2H_\text{out}W_\text{out}\\
+&\text{im2col:} && Y_\text{mat}=W_\text{mat}X_\text{col},\; (C_\text{out}\times C_\text{in}K^2)(C_\text{in}K^2\times H_\text{out}W_\text{out})\\
+&\text{BN (train):} && y=\gamma\,(x-\mu_B)/\sqrt{\sigma_B^2+\varepsilon}+\beta, \text{ stats over } (N,H,W),\ \varepsilon=10^{-5}\\
+&\text{BN running stats:} && r\leftarrow0.9\,r+0.1\,\text{stat}_B \quad(\text{unbiased variance})\\
+&\text{block:} && y=\ReLU\big(\BN(\conv(\ReLU(\BN(\conv_S(x)))))+s(x)\big)\\
+&\text{option-A shortcut:} && s(x)=\operatorname{pad}_\text{ch}\big(x[:,:,::2,::2]\big),\ (C_\text{out}-C_\text{in})/2 \text{ zero channels each side}\\
+&\text{He init:} && \mathcal W\sim\mathcal N(0,\,2/(9C_\text{in}))\\
+&\text{softmax, CE:} && s=\softmax(z),\quad \ell=\operatorname{logsumexp}(z)-z_y\\
+&\text{logit gradient:} && G_Z=(S-Y_\text{onehot})/N\\
+&\text{linear gradients:} && G_W=G_Z\T P,\quad G_b=\textstyle\sum_nG_Z[n],\quad G_P=G_ZW\\
+&\text{BN gradient:} && G_a=\tfrac{\gamma}{m\sigma_\varepsilon}\big(mG_y-\textstyle\sum G_y-\hat a\sum G_y\hat a\big)\\
+&\text{conv gradients:} && G_{W_\text{mat}}=\textstyle\sum_nG_{Y_\text{mat}}X_\text{col}\T,\quad G_{X_\text{col}}=W_\text{mat}\T G_{Y_\text{mat}}\ (\text{then col2im})\\
+&\text{SGD:} && v\leftarrow0.9\,v+(\nabla\mathcal L+10^{-4}\theta),\quad \theta\leftarrow\theta-\eta v\\
+&\text{schedule:} && \eta=0.1\ (t<32\text{k}),\ 0.01\ (t<48\text{k}),\ 0.001\ (t<64\text{k})\\
+&\text{ECE:} && \textstyle\sum_b\frac{|\mathcal B_b|}{n}|\text{acc}(b)-\text{conf}(b)|,\ 15 \text{ bins}
+\end{align*}
+
+\subsection*{Numbers worth remembering}
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{\qquad}ll@{}}
+\toprule
+parameters (ResNet-20) & 269{,}722 & parameters (ResNet-56) & 853{,}018\\
+share of params in stage 3 & 75\% & MACs / image & 40.6M\\
+iterations / epoch (50k) & 391 & epochs (final run) & 164\\
+training time (RTX 3050) & 36 min & test error & 8.42\% (paper 8.75\%)\\
+ECE (15 bins) & 0.052 & mean confidence / accuracy & 0.968 / 0.916\\
+CPU latency p50 (native) & 3.9 ms & forward pass alone & 1.4 ms\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Things this project does \emph{not} contain}
+\label{sec:notin}
+
+So that future-me does not ``remember'' features that were never there:
+\begin{itemize}[nosep]
+  \item No $1{\times}1$ projection shortcuts (options B/C), no bottleneck blocks, no pre-activation blocks.
+  \item No max-pooling, no dropout, no hidden fully connected layers, no softmax layer inside the model.
+  \item No division by a pixel standard deviation, no colour jitter, no Cutout/Mixup, no label smoothing.
+  \item No learning-rate warm-up (the paper uses one only for ResNet-110), no cosine schedule, no Nesterov momentum.
+  \item No exclusion of BN/bias parameters from weight decay.
+  \item No test-time augmentation: the test set is evaluated on single, original $32{\times}32$ views.
+  \item No temperature scaling or other post-hoc calibration.
+  \item No mixed precision, no multi-GPU, no data-loader workers, no per-epoch checkpointing.
+\end{itemize}
+
+\section{How this document was verified}
+
+Every code excerpt is copied from the repository at commit \texttt{bf47649} (``README fixes before going public''). Every number labelled as measured was produced by loading \file{model/resnet20.pt} and \file{model/pixel\_mean\_50k.npy} into \code{ResNetCIFAR(3)} from \file{cifar\_resnet/model.py}, by reading \file{artifacts/logs/*.csv} and \file{artifacts/preds/final\_res20.npz}, or by counting parameters of the model classes. The forward and backward formulas were checked numerically against PyTorch (\cref{sec:forward}). This document was drafted with the help of an AI assistant from the repository's code and artifacts. The code it describes was written by hand.

@@ -1,0 +1,73 @@
+\section{Inference and serving}
+\label{sec:serving}
+
+\begin{lstlisting}[firstnumber=11]
+model = ResNetCIFAR(3)
+load_checkpoint("model/resnet20.pt", model, None, device)
+model.eval()
+mean = np.load("model/pixel_mean_50k.npy")
+...
+@app.post("/predict")
+async def predict_image(file: UploadFile):
+    raw = await file.read()
+    try:
+        img = Image.open(BytesIO(raw)).convert("RGB")
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400,detail="Uploaded file is not a valid image")
+    if img.size != (32,32):
+        img = img.resize((32,32))
+    arr = np.asarray(img)
+    x = preprocess(arr,mean=mean).unsqueeze(0)
+    with torch.no_grad():
+        probs = torch.softmax(model(x),dim=1)
+        values,indices = torch.topk(probs,3)
+\end{lstlisting}
+
+\begin{center}
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[
+  n/.style={draw=ink,rounded corners=2pt,fill=#1,font=\scriptsize,minimum height=0.9cm,align=center,inner sep=2pt,text width=2.2cm},
+  n/.default=white, ar/.style={-{Stealth[length=2mm]},thick}]
+  \node[n=cIn] (a) at (0,0) {HTTP upload\\bytes};
+  \node[n=cIn] (b) at (2.55,0) {PIL \code{open}\\\code{.convert("RGB")}\\any $W{\times}H$};
+  \node[n=cK] (c) at (5.1,0) {\code{resize((32,32))}\\if not $32{\times}32$};
+  \node[n=cK] (d) at (7.65,0) {\code{np.asarray}\\\shp{32,32,3} \code{uint8}};
+  \node[n=c16] (e) at (10.2,0) {\code{preprocess}\\$+$\code{unsqueeze(0)}\\\shp{1,3,32,32}};
+  \node[n=c32] (f) at (12.75,0) {ResNet-20\\eval, no\_grad\\\shp{1,10}};
+  \node[n=cG] (g) at (12.75,-1.7) {softmax\\\code{topk(3)}};
+  \node[n=repo!20,text width=4.2cm] (h) at (8.9,-1.7) {\code{\{"top3": [\{"class","prob"\} x3]\}}};
+  \node[n=warn!20] (err) at (2.55,-1.7) {HTTP 400\\not an image};
+  \foreach \p/\q in {a/b,b/c,c/d,d/e,e/f,f/g,g/h} \draw[ar] (\p) -- (\q);
+  \draw[ar,warn] (b) -- (err);
+\end{tikzpicture}}
+\end{center}
+
+\begin{repo}[design points, each with a reason]
+\begin{itemize}[nosep]
+  \item \textbf{Same \code{preprocess} as training.} The service imports it from \file{cifar\_resnet/data.py} and uses the 50k mean that the final model was trained with. Training--serving skew in normalisation is the most common silent deployment bug, and sharing the function rules it out.
+  \item \textbf{Loaded once, at import time}, in eval mode on CPU. \code{load\_checkpoint(..., None, ...)} skips the optimiser. The app prints the parameter count (269{,}722) and \code{model.training} (\code{False}) at start-up as a self-check.
+  \item \textbf{Any image size is accepted} and resized to $32{\times}32$ with Pillow's default resampling filter. A large photo loses most of its detail, so predictions on it are less reliable than on CIFAR-like images. The README says so.
+  \item \textbf{\code{.convert("RGB")}} turns grayscale, palette and RGBA images into three channels. An alpha channel is dropped, not composited.
+  \item \textbf{Non-images} raise \code{UnidentifiedImageError} in PIL, which is mapped to HTTP 400 with a clear message instead of a 500.
+  \item \textbf{Batch of one}: \code{unsqueeze(0)} adds $N=1$. This is safe only because BN is in eval mode. In train mode a batch of one would make $\sigma^2_c$ come from a single image.
+  \item \textbf{\code{topk(probs, 3)}} returns the 3 largest values and their indices along the last axis, both \shp{1,3}, already sorted in decreasing order. The test \code{test\_valid\_image} checks the order and that \file{test0.png} is a cat.
+\end{itemize}
+\end{repo}
+
+\begin{repo}[latency, from the README]
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+measurement (100 requests after 10 warm-up, $32{\times}32$ PNG) & p50 & p95\\
+\midrule
+native on Windows (uvicorn, CPU) & 3.9 ms & 7.0 ms\\
+Docker Desktop on Windows (CPU) & 48 ms & 50 ms\\
+model forward pass alone & 1.4 ms & --\\
+\bottomrule
+\end{tabular}
+\end{center}
+At $\approx40.6$M MACs, the forward pass takes about 1.4\,ms on a CPU. The rest of the native request time is HTTP, multipart parsing and PIL decoding. The extra $\approx44$\,ms in Docker Desktop is in the request path into the container, not in the model.
+\end{repo}
+
+\begin{repo}[container]
+\file{Dockerfile}: \code{python:3.13-slim}, CPU-only \code{torch==2.14.1} from the PyTorch CPU index, then \file{requirements.txt} (FastAPI, NumPy, Pillow, python-multipart, uvicorn). It copies only \file{cifar\_resnet/}, \file{service/} and \file{model/} and runs \code{uvicorn service.app:app --host 0.0.0.0 --port 8000}. No torchvision is needed at serving time: \file{data.py} imports only \code{torch} and \code{numpy}.
+\end{repo}

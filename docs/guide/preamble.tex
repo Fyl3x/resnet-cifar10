@@ -1,0 +1,107 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{mathpazo}
+\renewcommand{\ttdefault}{txtt}
+\linespread{1.06}
+\usepackage[margin=2.2cm,headheight=14pt]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{graphicx}
+\usepackage{booktabs,tabularx,longtable,array,multirow}
+\usepackage{enumitem}
+\usepackage{siunitx}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric,decorations.pathreplacing,fit,backgrounds,matrix,patterns}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,capitalise]{cleveref}
+
+% ---------- colours ----------
+\definecolor{ink}{HTML}{1F2933}
+\definecolor{idea}{HTML}{2B6CB0}
+\definecolor{repo}{HTML}{2F855A}
+\definecolor{warn}{HTML}{C05621}
+\definecolor{shapec}{HTML}{6B46C1}
+\definecolor{cIn}{HTML}{E2E8F0}
+\definecolor{c16}{HTML}{BEE3F8}
+\definecolor{c32}{HTML}{C6F6D5}
+\definecolor{c64}{HTML}{FED7D7}
+\definecolor{cK}{HTML}{FEEBC8}
+\definecolor{cG}{HTML}{E9D8FD}
+\definecolor{codebg}{HTML}{F7FAFC}
+\color{ink}
+
+% ---------- headers ----------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsc{ResNet-20 refresher}}
+\fancyhead[R]{\small\nouppercase{\rightmark}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\titleformat{\section}{\Large\bfseries\color{idea!70!black}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.7em}{}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+
+% ---------- boxes ----------
+\newtcolorbox{idea}[1][]{enhanced,breakable,colback=idea!4,colframe=idea,boxrule=0.6pt,arc=2pt,left=6pt,right=6pt,top=9pt,bottom=5pt,
+  fonttitle=\bfseries\small,title={General idea\ifx&#1&\else: #1\fi},attach boxed title to top left={xshift=6pt,yshift=-2mm},boxed title style={colback=idea,arc=1pt,boxrule=0pt}}
+\newtcolorbox{repo}[1][]{enhanced,breakable,colback=repo!4,colframe=repo,boxrule=0.6pt,arc=2pt,left=6pt,right=6pt,top=9pt,bottom=5pt,
+  fonttitle=\bfseries\small,title={In this repository\ifx&#1&\else: #1\fi},attach boxed title to top left={xshift=6pt,yshift=-2mm},boxed title style={colback=repo,arc=1pt,boxrule=0pt}}
+\newtcolorbox{warn}[1][]{enhanced,breakable,colback=warn!5,colframe=warn,boxrule=0.6pt,arc=2pt,left=6pt,right=6pt,top=9pt,bottom=5pt,
+  fonttitle=\bfseries\small,title={Detail / deviation\ifx&#1&\else: #1\fi},attach boxed title to top left={xshift=6pt,yshift=-2mm},boxed title style={colback=warn,arc=1pt,boxrule=0pt}}
+\newtcolorbox{shapebox}[1][]{enhanced,breakable,colback=shapec!4,colframe=shapec,boxrule=0.6pt,arc=2pt,left=6pt,right=6pt,top=9pt,bottom=5pt,
+  fonttitle=\bfseries\small,title={Shape check\ifx&#1&\else: #1\fi},attach boxed title to top left={xshift=6pt,yshift=-2mm},boxed title style={colback=shapec,arc=1pt,boxrule=0pt}}
+
+% ---------- code ----------
+\lstset{basicstyle=\ttfamily\footnotesize,backgroundcolor=\color{codebg},frame=single,rulecolor=\color{black!15},
+  keywordstyle=\color{idea}\bfseries,commentstyle=\color{black!50}\itshape,stringstyle=\color{repo!80!black},
+  showstringspaces=false,columns=fullflexible,keepspaces=true,breaklines=true,xleftmargin=4pt,xrightmargin=4pt,language=Python,
+  numbers=left,numberstyle=\tiny\color{black!40},numbersep=6pt}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\file}[1]{\textcolor{repo!80!black}{\texttt{#1}}}
+
+% ---------- maths shortcuts ----------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\shp}[1]{\textcolor{shapec}{\ensuremath{(#1)}}}
+\newcommand{\T}{^{\!\top}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\ReLU}{ReLU}
+\DeclareMathOperator{\BN}{BN}
+\DeclareMathOperator{\softmax}{softmax}
+\DeclareMathOperator{\conv}{conv}
+\newcommand{\dd}[2]{\frac{\partial #1}{\partial #2}}
+
+% ---------- TikZ drawing helpers ----------
+% \tensor{x}{y}{W}{H}{D}{fill}{wlabel}{hlabel}{dlabel}   (front face lower-left at (x,y); depth drawn up-right)
+\newcommand{\tensor}[9]{%
+  \begin{scope}[shift={(#1,#2)}]
+    \colorlet{tfill}{#6}%
+    \pgfmathsetmacro{\dx}{0.55*#5}\pgfmathsetmacro{\dy}{0.40*#5}
+    \fill[tfill!90!black] (0,#4) -- ++(\dx,\dy) -- ++(#3,0) -- ++(-\dx,-\dy) -- cycle;
+    \fill[tfill!78!black] (#3,0) -- ++(\dx,\dy) -- ++(0,#4) -- ++(-\dx,-\dy) -- cycle;
+    \fill[tfill] (0,0) rectangle (#3,#4);
+    \draw[ink,line width=0.5pt] (0,0) rectangle (#3,#4);
+    \draw[ink,line width=0.5pt] (0,#4) -- ++(\dx,\dy) -- ++(#3,0) -- ++(0,-#4) -- ++(-\dx,-\dy);
+    \draw[ink,line width=0.5pt] (#3,#4) -- ++(\dx,\dy);
+    \node[below,font=\scriptsize] at (#3/2,0) {#7};
+    \node[left,font=\scriptsize] at (0,#4/2) {#8};
+    \node[above left,font=\scriptsize,inner sep=1pt] at (\dx/2,#4+\dy/2) {#9};
+  \end{scope}}
+% \matr{x}{y}{W}{H}{fill}{name}{rows}{cols}
+\newcommand{\matr}[8]{%
+  \begin{scope}[shift={(#1,#2)}]
+    \fill[#5] (0,0) rectangle (#3,#4);
+    \draw[ink,line width=0.5pt] (0,0) rectangle (#3,#4);
+    \node[font=\small] at (#3/2,#4/2) {#6};
+    \node[left,font=\scriptsize] at (0,#4/2) {#7};
+    \node[above,font=\scriptsize] at (#3/2,#4) {#8};
+  \end{scope}}

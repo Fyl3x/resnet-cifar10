@@ -1,0 +1,102 @@
+\section{The whole project on one page}
+\label{sec:overview}
+
+\subsection{What the project is}
+
+The repository \href{https://github.com/fyl3x/resnet-cifar10}{\texttt{fyl3x/resnet-cifar10}} reproduces the CIFAR-10 ResNet of He et al.\ (2015), \emph{Deep Residual Learning for Image Recognition}, Section~4.2. The network is the $6n+2$ family with $n=3$ (ResNet-20) as the headline model and $n=9$ (ResNet-56) for the depth ablation. Everything is written in plain PyTorch: the blocks, the He initialisation, the augmentation, the iteration-based learning-rate schedule, the training loop and the metrics. The final model reaches \textbf{8.42\% test error} (paper: 8.75\%, both single runs) and is served by a FastAPI app inside a CPU Docker image.
+
+\subsection{Pipeline at a glance}
+
+\begin{center}
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[
+  node distance=0.6cm and 0.5cm,
+  box/.style={draw=ink,rounded corners=2pt,fill=#1,align=center,font=\footnotesize,minimum height=1.25cm,text width=2.85cm,inner sep=3pt},
+  box/.default=cIn,
+  ar/.style={-{Stealth[length=2mm]},thick,ink}]
+  \node[box=cIn] (raw) {\textbf{CIFAR-10}\\ \code{uint8} $(50000,32,32,3)$\\labels $0..9$};
+  \node[box=cIn,right=of raw] (split) {\textbf{split / mean}\\45k/5k (seed 0) or 50k\\$\mu\in\R^{32\times32\times3}$};
+  \node[box=cK,right=of split] (aug) {\textbf{augment} (train)\\pad 4 $\to$ crop 32\\flip $p{=}0.5$};
+  \node[box=cK,right=of aug] (pre) {\textbf{preprocess}\\$/255$, $-\mu$, HWC$\to$CHW\\$(3,32,32)$ \code{float32}};
+  \node[box=c16,below=of pre] (batch) {\textbf{DataLoader}\\$X:(128,3,32,32)$\\$y:(128,)$ \code{int64}};
+  \node[box=c32,left=of batch] (model) {\textbf{ResNet-20}\\stem + 3 stages\\+ GAP + linear};
+  \node[box=c64,left=of model] (logits) {\textbf{logits}\\$Z:(128,10)$};
+  \node[box=c64,left=of logits] (loss) {\textbf{cross-entropy}\\$\mathcal L\in\R$ (mean)};
+  \node[box=cG,below=of loss] (back) {\textbf{backward}\\$\nabla_\theta\mathcal L$, same shapes\\as the 269{,}722 params};
+  \node[box=cG,right=of back] (sgd) {\textbf{SGD step}\\momentum 0.9, wd $10^{-4}$\\$\eta\in\{0.1,0.01,0.001\}$};
+  \node[box=cIn,right=of sgd] (loop) {repeat for 64{,}000 iterations\\(164 epochs on 50k)};
+  \node[box=repo!25,right=of loop] (serve) {\textbf{serving}\\PIL $\to$ resize 32 $\to$ same \code{preprocess} $\to$ softmax $\to$ top-3};
+  \draw[ar] (raw) -- (split); \draw[ar] (split) -- (aug); \draw[ar] (aug) -- (pre);
+  \draw[ar] (pre) -- (batch); \draw[ar] (batch) -- (model); \draw[ar] (model) -- (logits); \draw[ar] (logits) -- (loss);
+  \draw[ar] (loss) -- (back); \draw[ar] (back) -- (sgd); \draw[ar] (sgd) -- (loop);
+  \draw[ar,dashed] (loop.north) -- (loop.north |- model.south) node[midway,right,font=\scriptsize]{next batch};
+  \draw[ar,dotted] (loop) -- (serve);
+\end{tikzpicture}}
+\end{center}
+
+\subsection{Code map}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{5.4cm}>{\raggedright\arraybackslash}X l@{}}
+\toprule
+File & What it contains & Explained in\\
+\midrule
+\file{cifar\_resnet/data.py} & \code{split\_indices}, \code{compute\_pixel\_mean}, \code{augment}, \code{preprocess}, \code{CIFARDataset} & \cref{sec:data}\\
+\file{cifar\_resnet/model.py} & \code{BasicBlock} (residual or plain), \code{ResNetCIFAR} ($6n{+}2$, He init) & \cref{sec:block,sec:arch}\\
+\file{cifar\_resnet/train.py} & \code{train\_step}, \code{train\_one\_epoch}, \code{evaluate}, \code{lr\_at}, \code{set\_lr}, checkpoints & \cref{sec:optim}\\
+\file{cifar\_resnet/evaluate.py} & \code{predict} (softmax probs), confusion matrix, precision/recall/F1, ECE & \cref{sec:eval}\\
+\file{scripts/train\_resnet.py} & CLI: \code{--n --plain --seed --full --name --max-iters}; builds data, model, SGD, logs CSV & \cref{sec:optim}\\
+\file{scripts/eval\_test.py}, \file{scripts/make\_report.py}, \file{scripts/make\_ablation.py} & test-set evaluation, figures, ablation table & \cref{sec:eval}\\
+\file{service/app.py} & FastAPI: \code{GET /health}, \code{POST /predict} & \cref{sec:serving}\\
+\file{scripts/check\_*.py}, \file{overfit\_batch.py} & the development checks run at each stage & throughout\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{The configuration that every number in this document assumes}
+\label{sec:config}
+
+\begin{center}
+\small\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Quantity & Value in this repo & Where it is set\\
+\midrule
+Depth parameter $n$ & 3 (ResNet-20); 9 for ResNet-56 & \code{--n}, \code{ResNetCIFAR(n)}\\
+Stage widths & $(16, 32, 64)$ & \code{widths=(16,32,64)}\\
+Residual or plain & residual; \code{--plain} removes the shortcut & \code{BasicBlock(residual=...)}\\
+Shortcut & option A: stride-2 subsample + zero channel padding & \code{BasicBlock.forward}\\
+Classes & 10 & \code{num\_classes=10}\\
+Batch size $N$ & 128 & \code{DataLoader(batch\_size=128)}\\
+Optimiser & SGD, momentum $\mu=0.9$, weight decay $\lambda=10^{-4}$ & \file{train\_resnet.py}\\
+Learning rate $\eta$ & 0.1 / 0.01 / 0.001, switching at iterations 32k / 48k & \code{lr\_at}\\
+Iterations & 64{,}000 & \code{--max-iters}\\
+Loss & \code{nn.CrossEntropyLoss()} (mean over batch) & \file{train\_resnet.py}\\
+Initialisation & He normal, $\sigma=\sqrt{2/\text{fan\_in}}$, convs only & \code{\_init\_weights}\\
+Final training set & all 50{,}000 images (\code{--full}) & \file{train\_resnet.py}\\
+Development split & 45{,}000 / 5{,}000, split seed fixed to 0 & \code{split\_indices(50000,5000,0)}\\
+Parameters & 269{,}722 (ResNet-20), 853{,}018 (ResNet-56) & counted from the model\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Notation}
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{\qquad}ll@{}}
+\toprule
+$N$ & batch size (128) & $\mathcal W$ & 4-D conv weight $(C_\text{out},C_\text{in},K,K)$\\
+$C,H,W$ & channels, height, width & $W$ (linear) & weight matrix $(10,64)$\\
+$K,S,P$ & kernel size, stride, padding & $\gamma,\beta$ & BN scale and shift, shape $(C,)$\\
+$x$, $X$ & one input / a batch & $\mu_c,\sigma_c^2$ & BN batch mean and variance of channel $c$\\
+$\mathcal F(x)$ & residual branch of a block & $z$, $Z$ & logits of one image / a batch\\
+$s$ & softmax probabilities & $\mathcal L$ & mean cross-entropy over the batch\\
+$G_T$ & $\partial\mathcal L/\partial T$, \emph{same shape as $T$} & $\eta,\mu,\lambda$ & learning rate, momentum, weight decay\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Shapes are written in PyTorch order, e.g.\ \shp{128,16,32,32}. In drawings, a box of width $W$ and height $H$ with depth going into the page is one image's feature tensor, and the depth is its channel count. Box colours follow the stage: \colorbox{cIn}{input}, \colorbox{c16}{16 channels}, \colorbox{c32}{32 channels}, \colorbox{c64}{64 channels}, \colorbox{cK}{weights}, \colorbox{cG}{outputs/gradients}.
+
+Each section separates the \textcolor{idea}{\textbf{general idea}} (what the mathematics says, independent of this code), \textcolor{repo}{\textbf{in this repository}} (what the code actually does, with sizes), \textcolor{warn}{\textbf{details and deviations}} (where the code differs from a textbook or a reader could be surprised), and \textcolor{shapec}{\textbf{shape checks}}.

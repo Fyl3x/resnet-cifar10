@@ -1,0 +1,230 @@
+\section{One residual block in full detail}
+\label{sec:block}
+
+\subsection{The idea: learn a correction, not a whole mapping}
+
+\begin{idea}[residual learning]
+A stack of layers is asked to represent some mapping $\mathcal H(x)$. A residual block instead computes
+\[
+  y \;=\; \ReLU\big(\mathcal F(x) + s(x)\big),
+\]
+where $\mathcal F$ is a small stack of layers (the \emph{residual branch}) and $s$ is a \emph{shortcut} that is the identity whenever shapes allow. The branch only has to learn the difference $\mathcal F = \mathcal H - x$. If the best thing a block can do is ``nothing'', it only has to drive $\mathcal F$ towards zero, which is easy (shrink the last BN's $\gamma$). A plain stack has to learn an exact identity through two ReLU-convolutions, which is hard. He et al.\ argue that this is why deep plain networks \emph{train} worse (higher training error), not just generalise worse. This repo's ablation reproduces that effect (\cref{sec:ablation}).
+\end{idea}
+
+\subsection{The code}
+
+\begin{lstlisting}[firstnumber=6]
+class BasicBlock(nn.Module):
+    def __init__(self,in_ch,out_ch,stride,residual):
+        super().__init__()
+        ...
+        self.first_conv = nn.Conv2d(bias=False,in_channels=in_ch,out_channels=out_ch,stride=stride,padding=1,kernel_size=3)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU()
+        self.second_conv = nn.Conv2d(bias=False,in_channels=out_ch,out_channels=out_ch,stride=1,padding=1,kernel_size=3)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.downsampling_need = False
+        if residual:
+            if (stride != 1) or (in_ch != out_ch):
+                self.downsampling_need = True
+    def forward(self,x):
+        f = self.first_conv(x)
+        f = self.bn1(f)
+        f = self.relu(f)
+        f = self.second_conv(f)
+        f = self.bn2(f)
+        if self.residual:
+            if self.downsampling_need:
+                x = x[:,:,::2,::2]
+                pads = (self.out_ch - self.in_ch) // 2
+                x = F.pad(x, (0, 0, 0, 0, pads, pads))
+            x = x + f
+        else:
+            x = f
+        x = self.relu(x)
+        return x
+\end{lstlisting}
+
+\subsection{The block as equations}
+
+\begin{repo}[exact forward computation of \texttt{BasicBlock}]
+With $\mathcal W_1\in\R^{C_\text{out}\times C_\text{in}\times3\times3}$ (stride $S$), $\mathcal W_2\in\R^{C_\text{out}\times C_\text{out}\times3\times3}$ (stride 1) and BN parameters $(\gamma_1,\beta_1)$, $(\gamma_2,\beta_2)\in\R^{C_\text{out}}$:
+\begin{alignat*}{2}
+  a_1 &= \conv_{S}(x;\mathcal W_1) &&\qquad\text{\small first conv: may halve $H,W$, may change depth}\\
+  b_1 &= \BN_{\gamma_1,\beta_1}(a_1)\\
+  r_1 &= \ReLU(b_1)\\
+  a_2 &= \conv_{1}(r_1;\mathcal W_2) &&\qquad\text{\small second conv: shape preserved}\\
+  \mathcal F(x) = b_2 &= \BN_{\gamma_2,\beta_2}(a_2) &&\qquad\text{\small no ReLU yet}
+\end{alignat*}
+\[
+  s(x) = \begin{cases}
+    x & \text{residual, } S=1,\ C_\text{in}=C_\text{out}\\
+    \operatorname{pad}_\text{ch}\!\big(x[:,:,::2,::2]\big) & \text{residual, } S=2 \text{ or } C_\text{in}\neq C_\text{out}\\
+    0 & \text{plain (\code{residual=False})}
+  \end{cases}
+\]
+\[
+  \boxed{\,y = \ReLU\big(\mathcal F(x) + s(x)\big)\,}
+\]
+The ReLU comes \emph{after} the addition. This is the original ``post-activation'' ResNet v1 block of the 2015 paper, not the 2016 pre-activation variant.
+\end{repo}
+
+\subsection{Identity block: 16 channels in, 16 out, stride 1}
+\label{sec:idblock}
+
+This is every block of stage 1, and blocks 2--3 of stages 2 and 3 with their own widths.
+
+\begin{center}
+\begin{tikzpicture}[
+  op/.style={draw=ink,rounded corners=2pt,fill=#1,font=\scriptsize,minimum width=3.0cm,minimum height=0.62cm,align=center},
+  op/.default=white,
+  ar/.style={-{Stealth[length=2mm]},thick}]
+  \node[op=cIn] (x) at (0,0) {$x$};
+  \node[op=cK]  (c1) at (0,-1.2) {conv $3{\times}3$, $16{\to}16$, $S{=}1$, $P{=}1$};
+  \node[op=cG]  (b1) at (0,-2.2) {BN(16)};
+  \node[op]     (r1) at (0,-3.2) {ReLU};
+  \node[op=cK]  (c2) at (0,-4.2) {conv $3{\times}3$, $16{\to}16$, $S{=}1$, $P{=}1$};
+  \node[op=cG]  (b2) at (0,-5.2) {BN(16)};
+  \node[circle,draw,thick,inner sep=1pt,font=\small] (add) at (0,-6.3) {$+$};
+  \node[op]     (r2) at (0,-7.3) {ReLU};
+  \node[op=cIn] (y) at (0,-8.4) {$y$};
+  \draw[ar] (x) -- (c1); \draw[ar] (c1) -- (b1); \draw[ar] (b1) -- (r1); \draw[ar] (r1) -- (c2); \draw[ar] (c2) -- (b2); \draw[ar] (b2) -- (add); \draw[ar] (add) -- (r2); \draw[ar] (r2) -- (y);
+  \draw[ar,repo,line width=1.4pt] (x.west) -- ++(-1.1,0) |- (add.west) node[pos=0.25,left,font=\scriptsize,align=right]{identity\\shortcut\\$s(x)=x$\\(0 params)};
+  % shapes on the right
+  \foreach \yy/\lab in {0/{$x$}, -1.2/{$a_1$}, -2.2/{$b_1$}, -3.2/{$r_1$}, -4.2/{$a_2$}, -5.2/{$b_2=\mathcal F(x)$}, -6.3/{$\mathcal F(x)+x$}, -8.4/{$y$}} {
+    \node[right,font=\scriptsize,shapec] at (2.0,\yy) {\lab\; \shp{N,16,32,32}};
+  }
+  \node[right,font=\scriptsize] at (6.0,-1.2) {weights \shp{16,16,3,3}: 2{,}304};
+  \node[right,font=\scriptsize] at (6.0,-2.2) {$\gamma_1,\beta_1$: $2\times16=32$};
+  \node[right,font=\scriptsize] at (6.0,-4.2) {weights \shp{16,16,3,3}: 2{,}304};
+  \node[right,font=\scriptsize] at (6.0,-5.2) {$\gamma_2,\beta_2$: $2\times16=32$};
+  \node[right,font=\scriptsize] at (6.0,-7.3) {total: \textbf{4{,}672} parameters};
+\end{tikzpicture}
+\end{center}
+
+\begin{shapebox}[identity block, worked]
+Input \shp{128,16,32,32}. First conv: $H_\text{out}=\lfloor(32+2-3)/1\rfloor+1=32$, depth $=$ number of filters $=16$, so \shp{128,16,32,32}. BN and ReLU preserve shape. Second conv: same arithmetic, \shp{128,16,32,32}. The shortcut is $x$ itself, \shp{128,16,32,32}, so the addition is element-wise with no broadcasting (shapes identical). The output is \shp{128,16,32,32}. In im2col form, each conv is $(16\times144)\cdot(144\times1024)$ per image, i.e.\ $2.36$M MACs.
+\end{shapebox}
+
+\subsection{Downsampling block: 16 channels in, 32 out, stride 2}
+\label{sec:shortcut}
+
+This is the first block of stage 2 (and, with $32\to64$ and $16\to8$, the first block of stage 3). Here the two branches would not have the same shape unless the shortcut does something.
+
+\begin{center}
+\begin{tikzpicture}[
+  op/.style={draw=ink,rounded corners=2pt,fill=#1,font=\scriptsize,minimum width=3.0cm,minimum height=0.62cm,align=center},
+  op/.default=white,
+  ar/.style={-{Stealth[length=2mm]},thick}]
+  \node[op=c16] (x) at (0,0) {$x$ \shp{N,16,32,32}};
+  \node[op=cK]  (c1) at (0,-1.2) {conv $3{\times}3$, $16{\to}32$, $\mathbf{S{=}2}$};
+  \node[op=cG]  (b1) at (0,-2.2) {BN(32)};
+  \node[op]     (r1) at (0,-3.2) {ReLU};
+  \node[op=cK]  (c2) at (0,-4.2) {conv $3{\times}3$, $32{\to}32$, $S{=}1$};
+  \node[op=cG]  (b2) at (0,-5.2) {BN(32)};
+  \node[circle,draw,thick,inner sep=1pt,font=\small] (add) at (0,-6.3) {$+$};
+  \node[op]     (r2) at (0,-7.3) {ReLU};
+  \node[op=c32] (y) at (0,-8.4) {$y$ \shp{N,32,16,16}};
+  \draw[ar] (x) -- (c1); \draw[ar] (c1) -- (b1); \draw[ar] (b1) -- (r1); \draw[ar] (r1) -- (c2); \draw[ar] (c2) -- (b2); \draw[ar] (b2) -- (add); \draw[ar] (add) -- (r2); \draw[ar] (r2) -- (y);
+  \node[op=repo!20,minimum width=2.9cm] (sub) at (-4.3,-2.2) {\code{x[:, :, ::2, ::2]}\\ \shp{N,16,16,16}};
+  \node[op=repo!20,minimum width=2.9cm] (pad) at (-4.3,-4.2) {\code{F.pad(x,(0,0,0,0,8,8))}\\ \shp{N,32,16,16}};
+  \draw[ar,repo,line width=1.4pt] (x.west) -| (sub.north);
+  \draw[ar,repo,line width=1.4pt] (sub) -- (pad);
+  \draw[ar,repo,line width=1.4pt] (pad.south) |- (add.west);
+  \foreach \yy/\lab in {-1.2/{$a_1$ \shp{N,32,16,16}}, -2.2/{$b_1$ \shp{N,32,16,16}}, -4.2/{$a_2$ \shp{N,32,16,16}}, -5.2/{$\mathcal F(x)$ \shp{N,32,16,16}}} {
+    \node[right,font=\scriptsize,shapec] at (2.0,\yy) {\lab};
+  }
+  \node[right,font=\scriptsize] at (2.0,-6.3) {shapes now match $\Rightarrow$ element-wise add};
+  \node[right,font=\scriptsize,align=left] at (2.0,-7.6) {params: $4{,}608 + 64 + 9{,}216 + 64$\\$=\textbf{13{,}952}$ (shortcut: 0)};
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Step 1: spatial subsampling.} \code{x[:,:,::2,::2]} keeps rows $0,2,4,\dots,30$ and columns $0,2,\dots,30$:
+\[
+  x_\text{sub}[n,c,i,j] = x[n,c,2i,2j], \qquad \shp{N,16,32,32}\to\shp{N,16,16,16}.
+\]
+Three quarters of the positions are dropped (no averaging). As shown in \cref{sec:conv}, the stride-2 convolution of the main branch centres its windows on the same even positions $(2i,2j)$, so output pixel $(i,j)$ of the branch and of the shortcut describe the same place in the image.
+
+\paragraph{Step 2: channel zero-padding.} \code{F.pad}'s padding tuple is read \emph{from the last axis backwards} in pairs: $(\text{left},\text{right})$ of $W$, then $(\text{top},\text{bottom})$ of $H$, then $(\text{front},\text{back})$ of the channel axis. So \code{(0,0,0,0,8,8)} leaves $W$ and $H$ alone and adds 8 all-zero channels \emph{before} and 8 \emph{after} the existing 16. Here \code{pads = (32-16)//2 = 8}; for stage 3 it is \code{(64-32)//2 = 16}.
+
+\begin{center}
+\begin{tikzpicture}[scale=0.9]
+  % channels drawn as a row of thin strips (one strip = one 16x16 map seen edge-on)
+  \foreach \c in {0,...,15} { \fill[c16,draw=ink!70] (0.22*\c,0) rectangle ++(0.2,1.6); }
+  \node[font=\scriptsize,below,align=center] at (1.75,-0.1) {$x_\text{sub}$: 16 channels\\(each a $16{\times}16$ map)};
+  \draw[-{Stealth},thick] (4.0,0.8) -- (5.3,0.8) node[midway,above,font=\scriptsize]{\code{F.pad}};
+  \begin{scope}[shift={(5.7,0)}]
+  \foreach \c in {0,...,31} {
+    \pgfmathtruncatemacro{\isz}{(\c<8 || \c>23) ? 1 : 0}
+    \ifnum\isz=1 \fill[black!8,draw=black!45] (0.22*\c,0) rectangle ++(0.2,1.6);
+    \else \fill[c16,draw=ink!70] (0.22*\c,0) rectangle ++(0.2,1.6); \fi
+  }
+  \draw[decorate,decoration={brace,amplitude=4pt,mirror}] (0,-0.1) -- (1.74,-0.1) node[midway,below=5pt,font=\scriptsize,align=center]{ch 0--7\\all zeros};
+  \draw[decorate,decoration={brace,amplitude=4pt,mirror}] (1.76,-0.1) -- (5.26,-0.1) node[midway,below=5pt,font=\scriptsize,align=center]{ch 8--23\\$=x_\text{sub}$ ch 0--15};
+  \draw[decorate,decoration={brace,amplitude=4pt,mirror}] (5.28,-0.1) -- (7.02,-0.1) node[midway,below=5pt,font=\scriptsize,align=center]{ch 24--31\\all zeros};
+  \node[font=\scriptsize,above] at (3.5,1.65) {$s(x)$: 32 channels, \shp{N,32,16,16}};
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+\[
+  s(x)[n,c,i,j] =
+  \begin{cases}
+    x[n,\,c-8,\,2i,\,2j] & 8\le c\le 23\\
+    0 & \text{otherwise}
+  \end{cases}
+\]
+\[
+  \Longrightarrow\qquad y[n,c] = \ReLU\big(\mathcal F(x)[n,c] + s(x)[n,c]\big).
+\]
+Output channels 0--7 and 24--31 receive \emph{only} the residual branch. Channels 8--23 receive branch $+$ old features.
+
+\begin{repo}[verified on the trained model]
+Feeding \file{samples/test0.png} through the trained network and inspecting the first block of stage 2: \code{s(x)} has shape \shp{1,32,16,16}, channels 0--7 and 24--31 are exactly zero, channels 8--23 are not, and recomputing $\ReLU(\mathcal F(x)+s(x))$ by hand matches \code{stage2[0](x)} with maximum difference $0.0$.
+\end{repo}
+
+\begin{warn}[``option A'' vs.\ the alternatives]
+The paper describes three shortcut options. (A) Zero-padding for increasing dimensions, parameter-free. (B) $1{\times}1$ projection convolutions only where dimensions change. (C) Projections everywhere. For the CIFAR-10 networks the paper says ``we use identity shortcuts in all cases (i.e., option A)'', and this repo follows that, so the shortcut adds \textbf{zero parameters} and the plain and residual models have \emph{identical} parameter counts (269{,}722 each for $n=3$). The paper does not specify which side the zero channels go on. This repo pads symmetrically (8 before, 8 after), a common choice in public reimplementations; padding only at the end would be equally valid. The subsampling takes every other pixel; it is not average pooling.
+\end{warn}
+
+\subsection{The plain block}
+
+\begin{repo}[\texttt{residual=False}, used by \texttt{--plain}]
+The branch is identical, but \code{x = f} replaces \code{x = x + f}, so $y=\ReLU(\mathcal F(x))$. There is no shortcut, \code{downsampling\_need} stays \code{False}, and the subsample/pad code never runs. Shapes still work because the first convolution alone handles both the stride and the channel change. Same layers, same parameters, same FLOPs: the only difference between ``plain-20'' and ``ResNet-20'' is the $+\,s(x)$. That is what makes the ablation a clean experiment.
+\end{repo}
+
+\subsection{Why the shortcut helps optimisation (the one-line gradient argument)}
+\label{sec:whyres}
+
+\begin{idea}
+Ignore the final ReLU for a moment, so a block is $y = x + \mathcal F(x)$. Its Jacobian is
+\[
+  \dd{y}{x} = I + \dd{\mathcal F}{x}.
+\]
+Back-propagating through $L$ stacked identity blocks multiplies these:
+\[
+  \dd{\mathcal L}{x_0} \;=\; \dd{\mathcal L}{x_L}\prod_{l=1}^{L}\Big(I + \dd{\mathcal F_l}{x_{l-1}}\Big)
+  \;=\; \dd{\mathcal L}{x_L}\Big(I + \sum_l \dd{\mathcal F_l}{x_{l-1}} + \cdots\Big).
+\]
+The expansion always contains the bare term $\partial\mathcal L/\partial x_L$, so the gradient reaches early layers unchanged by any weight matrix. In a plain network the gradient is $\prod_l \partial\mathcal F_l/\partial x_{l-1}$, a product of $L$ Jacobians, with no such guaranteed path. The real block has a ReLU after the add, which zeroes the gradient where $y=0$; this weakens the argument but does not remove the path. BN keeps each $\partial\mathcal F/\partial x$ well scaled. This is a sketch of the intuition, not a proof. The ablation (plain-56 has \emph{higher training error} than plain-20, while res-56 beats res-20) is the empirical evidence.
+\end{idea}
+
+\subsection{Activations in a real block}
+
+\begin{repo}[block \texttt{stage1.0} on \texttt{samples/test0.png}, trained model, eval mode]
+\begin{center}
+\small
+\begin{tabular}{@{}lcrrrr@{}}
+\toprule
+tensor & shape & mean & std & min & max\\
+\midrule
+input $x$ (output of stem ReLU) & \shp{1,16,32,32} & 0.439 & 0.513 & 0.00 & 3.65 \\
+$a_1$ = first conv & \shp{1,16,32,32} & $-0.325$ & 2.130 & $-9.15$ & 5.72\\
+$b_1$ = BN1 & \shp{1,16,32,32} & 0.090 & 0.806 & $-3.52$ & 3.29\\
+$a_2$ = second conv (after ReLU) & \shp{1,16,32,32} & 0.035 & 1.493 & $-8.37$ & 7.26\\
+$\mathcal F(x)=b_2$ = BN2 & \shp{1,16,32,32} & 0.044 & 0.656 & $-3.52$ & 3.15\\
+$y=\ReLU(\mathcal F(x)+x)$ & \shp{1,16,32,32} & 0.615 & 0.682 & 0.00 & 5.31\\
+\bottomrule
+\end{tabular}
+\end{center}
+The convolution outputs have a large spread (std $\approx 2$), and BN brings each channel back to std $\lesssim 1$ before the next non-linearity. 25.6\% of the block's outputs are exactly zero after the final ReLU. The residual branch $\mathcal F(x)$ is small compared with the running signal: its std is $0.66$, while the output's mean is $0.62$. This is the ``small correction'' picture of residual learning, measured.
+\end{repo}

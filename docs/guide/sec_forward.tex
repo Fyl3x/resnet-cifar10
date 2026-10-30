@@ -1,0 +1,106 @@
+\section{A complete forward pass with real numbers}
+\label{sec:forward}
+
+This section follows a single image, \file{samples/test0.png} (a CIFAR-10 test cat, label 3), through the \emph{trained} model \file{model/resnet20.pt} in eval mode. Every number below was read from the actual tensors. This is the same image the README uses for its API example, so the final probabilities can be checked against the README.
+
+\subsection{Input}
+
+\begin{repo}
+\code{Image.open(...).convert("RGB")} gives a $32\times32$ RGB image, and \code{np.asarray} turns it into \shp{32,32,3} \code{uint8}. Its top-left pixel is $(158,112,49)$ and its centre pixel $(101,101,92)$. After \code{preprocess(arr, mean).unsqueeze(0)}: shape \shp{1,3,32,32}, values in $[-0.438,0.591]$, mean $-0.048$. The \code{unsqueeze(0)} adds the batch axis with $N=1$.
+\end{repo}
+
+\subsection{One output pixel of the stem, computed by hand}
+
+The stem convolution has 16 filters of shape \shp{3,3,3}. Take filter $o=4$ (the one with the largest norm, $\|\mathcal W[4]\|_2 = 3.18$) and output position $(i,j)=(10,12)$. With $P=1$, $S=1$, the window covers padded rows $10..12$ and columns $12..14$, which are original rows $9..11$ and columns $11..13$, all inside the image. The output is the sum of the element-wise product of two $3\times3\times3$ blocks, i.e.\ a dot product of two 27-vectors:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.1}
+\setlength{\arraycolsep}{3pt}
+\small
+\begin{tabular}{@{}c@{\hspace{1.2em}}c@{\hspace{1.2em}}c@{}}
+& \textbf{input window $\tilde X[0,c,10{:}13,12{:}15]$} & \textbf{filter $\mathcal W[4,c]$}\\[2pt]
+$c=0$ (R) & $\begin{bmatrix}0.108&0.177&0.075\\0.140&0.214&0.107\\0.164&0.221&0.235\end{bmatrix}$ &
+$\begin{bmatrix}-0.106&-0.643&-1.138\\0.728&0.178&-0.991\\1.029&1.219&0.467\end{bmatrix}$\\[14pt]
+$c=1$ (G) & $\begin{bmatrix}0.024&0.110&0.024\\0.044&0.139&0.053\\0.077&0.151&0.190\end{bmatrix}$ &
+$\begin{bmatrix}0.177&0.360&0.357\\-0.311&-0.571&-0.476\\-0.376&-0.754&-0.442\end{bmatrix}$\\[14pt]
+$c=2$ (B) & $\begin{bmatrix}0.006&0.108&0.029\\0.059&0.153&0.063\\0.073&0.143&0.174\end{bmatrix}$ &
+$\begin{bmatrix}-0.004&0.650&0.587\\-0.394&0.289&0.604\\-0.819&-0.152&0.396\end{bmatrix}$
+\end{tabular}
+\end{center}
+\[
+  Y[0,4,10,12] \;=\; \sum_{c=0}^{2}\sum_{u=0}^{2}\sum_{v=0}^{2}\mathcal W[4,c,u,v]\,\tilde X[0,c,10+u,12+v] \;=\; 0.21236 ,
+\]
+which matches PyTorch's \code{model.stem(x)[0,4,10,12]} $=0.21236$ to six digits. In the red channel, this filter has a negative top-right and positive bottom-left pattern: a diagonal edge detector.
+
+\begin{repo}[corner pixels use the zero padding]
+At $(i,j)=(0,0)$ the window covers padded rows/columns $0..2$, and row/column 0 of $\tilde X$ is the conv padding (zeros, \emph{not} $-\mu$). Five of the nine positions in each channel are zeros. Only the $2\times2$ top-left block of real pixels contributes, giving $Y[0,4,0,0]=-0.12623$. Computing it by hand with the padded window again matches PyTorch exactly.
+\end{repo}
+
+\subsection{BatchNorm in eval mode on real parameters}
+
+\begin{repo}[stem BN, first four channels]
+\begin{center}
+\small
+\begin{tabular}{@{}crrrrrr@{}}
+\toprule
+$c$ & $\gamma_c$ & $\beta_c$ & $r_\mu$ & $r_{\sigma^2}$ & $a_c=\gamma_c/\sqrt{r_{\sigma^2}+\varepsilon}$ & $b_c=\beta_c-a_c r_\mu$\\
+\midrule
+0 & 0.0112 & $-0.0338$ & $-0.0038$ & 0.00034 & 0.6043 & $-0.0315$\\
+1 & 0.6265 & 1.4951 & $-0.0312$ & 0.0937 & 2.0471 & 1.5590\\
+2 & 0.6622 & 0.3810 & $-0.0169$ & 0.2595 & 1.3001 & 0.4030\\
+3 & 0.6092 & 0.0945 & $-0.1333$ & 0.3837 & 0.9835 & 0.2255\\
+\bottomrule
+\end{tabular}
+\end{center}
+In eval mode each channel is just $y=a_c\,x+b_c$ (\cref{sec:evalbn}). Channel 0 is interesting. Its filter has norm $0.047$ (all others are $1.2$--$3.2$), its $\gamma$ is $0.011$, and its pre-BN variance is tiny. Its output is therefore $\approx -0.03$ everywhere, which the next ReLU turns into 0. Weight decay (\cref{sec:wd}) has effectively \emph{switched this channel off}: the trained stem uses 15 of its 16 filters.
+\end{repo}
+
+\subsection{Statistics through the whole network}
+
+\begin{repo}[activations of \texttt{test0.png}, trained model, eval mode]
+\begin{center}
+\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+after & shape & mean & std & max & \% zeros\\
+\midrule
+input & \shp{1,3,32,32} & $-0.048$ & -- & 0.591 & --\\
+stem conv & \shp{1,16,32,32} & 0.005 & 0.418 & 2.12 & --\\
+stem BN & \shp{1,16,32,32} & 0.356 & 0.618 & 3.65 & --\\
+stem ReLU & \shp{1,16,32,32} & 0.439 & 0.513 & 3.65 & 29.7\\
+stage 1 (3 blocks) & \shp{1,16,32,32} & 0.949 & 0.754 & 4.83 & 10.5\\
+stage 2 (3 blocks) & \shp{1,32,16,16} & 0.652 & 0.797 & 5.66 & 32.8\\
+stage 3 (3 blocks) & \shp{1,64,8,8} & 0.912 & 1.486 & 12.05 & 44.3\\
+GAP + flatten & \shp{1,64} & 0.912 & 0.802 & 3.69 & 0.0\\
+linear (logits) & \shp{1,10} & 0.006 & 10.25 & 23.91 & --\\
+\bottomrule
+\end{tabular}
+\end{center}
+The activations stay in a narrow, healthy range through 19 convolutions. Normalisation keeps them from exploding, and the shortcuts keep a running signal. Sparsity grows with depth: in stage 3, 44\% of the units are silent. The 64 pooled features are all strictly positive (GAP of non-negative maps, min $0.044$). The largest are channels 61, 15, 11, 1 and 50.
+\end{repo}
+
+\subsection{From pooled features to a decision}
+
+\begin{repo}[the last matrix multiplication, in numbers]
+$p\in\R^{1\times64}$, $W\T\in\R^{64\times10}$, $b\in\R^{10}$. Logit $k$ is $z_k = \sum_{c=0}^{63} W_{k,c}\,p_c + b_k$:
+\[
+  z = \big(\underbrace{-4.13}_{\text{plane}},\;\underbrace{-0.13}_{\text{car}},\;\underbrace{0.38}_{\text{bird}},\;\underbrace{\mathbf{23.91}}_{\text{cat}},\;\underbrace{-10.23}_{\text{deer}},\;\underbrace{8.23}_{\text{dog}},\;\underbrace{4.10}_{\text{frog}},\;\underbrace{-6.30}_{\text{horse}},\;\underbrace{-6.56}_{\text{ship}},\;\underbrace{-9.22}_{\text{truck}}\big).
+\]
+The cat logit is the sum of 64 products plus $b_3=0.494$. Its three largest terms come from pooled channels 1, 61 and 11 ($3.83$, $3.73$, $2.55$). The runner-up is dog, at $8.23$.
+
+Softmax: $s_\text{cat} = 1/\big(1+\sum_{k\neq3}e^{z_k-z_3}\big)$. The dominant term is $e^{8.23-23.91}=e^{-15.68}\approx1.55\times10^{-7}$, so
+\[
+  s_\text{cat}=0.99999988,\qquad s_\text{dog}=1.55\times10^{-7},\qquad s_\text{frog}=2.51\times10^{-9},
+\]
+which are exactly the three entries the service returns for this image in the README. $\hat y=\argmax_k z_k=3=$ cat. The cross-entropy for the true label is $\ell=\operatorname{logsumexp}(z)-z_3=1.19\times10^{-7}$, essentially zero.
+\end{repo}
+
+\begin{warn}[a logit gap of 15.7 means overconfidence]
+A gap that large between the top two logits is typical of this model and is the mechanism behind the overconfidence measured in \cref{sec:calib}. Cross-entropy keeps rewarding larger margins on training images even after they are classified correctly, until weight decay balances it. Nothing in the recipe (no label smoothing, no temperature scaling) counteracts this.
+\end{warn}
+
+\subsection{An independent check of every formula in this document}
+
+\begin{repo}[NumPy re-implementation]
+To make sure the equations here describe what the code computes, the forward pass was re-implemented from the formulas of \cref{sec:toolkit,sec:block} alone, in \code{float64} NumPy, reading only the checkpoint's \code{state\_dict}: im2col convolution (\cref{sec:im2col}), eval-mode BN as $a_cx+b_c$, ReLU, the option-A shortcut (\code{[:, ::2, ::2]} then 8/16 zero channels on each side), GAP and $Wp+b$. Its logits on \file{test0.png} match PyTorch's to within $4.5\times10^{-6}$ (the difference is \code{float32} rounding in PyTorch). The backward formulas of \cref{sec:backprop} were checked the same way against autograd: BN backward to $10^{-15}$, conv $\partial/\partial\mathcal W$ and $\partial/\partial X$ (both stride 1 and stride 2, via col2im and via transposed convolution) to $10^{-15}$, and one SGD step (\cref{sec:sgd}) against \code{torch.optim.SGD} to $4\times10^{-6}$.
+\end{repo}

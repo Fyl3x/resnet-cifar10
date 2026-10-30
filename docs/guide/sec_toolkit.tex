@@ -1,0 +1,408 @@
+\section{The mathematical toolkit, one operation at a time}
+\label{sec:toolkit}
+
+Every layer in ResNet-20 is one of six operations: matrix multiplication (inside the linear layer), 2-D convolution, batch normalisation, ReLU, global average pooling, and the softmax/cross-entropy pair at the end. This section treats each one on its own, first in general, then with the exact sizes this repository uses. Sections~\ref{sec:block} and~\ref{sec:arch} then just compose them.
+
+%-------------------------------------------------------------------
+\subsection{Matrix multiplication and how shapes align}
+\label{sec:matmul}
+
+\begin{idea}[the inner dimensions must match and disappear]
+For $A\in\R^{m\times k}$ and $B\in\R^{k\times n}$, the product $C=AB\in\R^{m\times n}$ is
+\[
+  C_{ij} \;=\; \sum_{t=1}^{k} A_{it}\,B_{tj}, \qquad i=1..m,\; j=1..n .
+\]
+Entry $C_{ij}$ is the dot product of \emph{row $i$ of $A$} with \emph{column $j$ of $B$}, so both must have length $k$. The shared (inner) dimension $k$ is summed away; the outer dimensions $m$ and $n$ survive:
+\[
+  \underbrace{(m\times \cancel{k})}_{A}\;\cdot\;\underbrace{(\cancel{k}\times n)}_{B}\;=\;\underbrace{(m\times n)}_{C},
+  \qquad \text{cost} = m\,k\,n \text{ multiply--adds.}
+\]
+\end{idea}
+
+The picture below is the one to keep in your head: put $B$ above $C$ and $A$ to its left. Then every cell of $C$ sits at the crossing of one row of $A$ and one column of $B$.
+
+\begin{center}
+\begin{tikzpicture}[scale=0.9]
+  % B on top
+  \matr{3.2}{3.0}{4.0}{1.6}{c32}{$B$}{$k$}{$n$}
+  % A left
+  \matr{0}{0}{1.6}{2.6}{c16}{$A$}{$m$}{$k$}
+  % C
+  \matr{3.2}{0}{4.0}{2.6}{cG}{}{$m$}{}
+  \node[font=\small] at (5.2,0.35) {$C=AB$};
+  \node[below,font=\scriptsize] at (5.2,0) {$n$};
+  % highlight row and column
+  \fill[idea,opacity=0.35] (0,1.55) rectangle (1.6,1.85);
+  \fill[repo,opacity=0.45] (5.6,3.0) rectangle (5.9,4.6);
+  \fill[warn] (5.6,1.55) rectangle (5.9,1.85);
+  \draw[-{Stealth},warn,thick] (1.6,1.7) -- (5.55,1.7);
+  \draw[-{Stealth},warn,thick] (5.75,3.0) -- (5.75,1.9);
+  \node[warn,font=\scriptsize,align=left,right] at (7.4,1.7) {$C_{ij}=\sum_t A_{it}B_{tj}$\\row $i$ of $A$ $\cdot$ column $j$ of $B$};
+\end{tikzpicture}
+\end{center}
+
+\begin{repo}[where matrix multiplication appears]
+Explicitly, only once: the final \code{nn.Linear(64, 10)}. Implicitly, every convolution is a matrix multiplication after the \emph{im2col} rearrangement (\cref{sec:im2col}). Batch normalisation, ReLU and pooling are not matrix multiplications.
+\end{repo}
+
+%-------------------------------------------------------------------
+\subsection{The fully connected (linear) layer}
+\label{sec:linear}
+
+\begin{idea}[affine map, PyTorch convention]
+PyTorch stores the weight of \code{nn.Linear(in, out)} as $W\in\R^{\text{out}\times\text{in}}$ and computes, for a batch $X\in\R^{N\times\text{in}}$ (one example per row),
+\[
+  Z \;=\; X\,W\T + \mathbf{1}_N\, b\T, \qquad Z\in\R^{N\times\text{out}}, \quad b\in\R^{\text{out}} .
+\]
+Each row $z_n = W x_n + b$ is the textbook ``$Wx+b$''; stacking examples as rows is what turns it into $XW\T$. The bias row is \emph{broadcast}: the same $b$ is added to every one of the $N$ rows.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.85]
+  \matr{0}{0}{2.2}{3.2}{c64}{$X$}{$N{=}128$}{$\text{in}{=}64$}
+  \node at (2.9,1.6) {$\times$};
+  \matr{4.0}{0.5}{1.0}{2.2}{cK}{$W\T$}{$64$}{$10$}
+  \node at (5.6,1.6) {$+$};
+  \matr{6.3}{2.9}{1.0}{0.3}{cK}{}{}{$b\T\;(1{\times}10)$}
+  \draw[-{Stealth},dashed] (6.8,2.85) -- (6.8,0.3);
+  \node[font=\scriptsize,align=center] at (6.8,1.4) {\colorbox{white}{broadcast}\\\colorbox{white}{to 128 rows}};
+  \node at (7.9,1.6) {$=$};
+  \matr{9.0}{0}{1.0}{3.2}{cG}{$Z$}{$128$}{$10$}
+  \node[right,font=\scriptsize,align=left] at (10.2,1.6) {logits:\\ one row per image,\\ one column per class};
+\end{tikzpicture}
+\end{center}
+
+\begin{repo}[\texttt{self.linear = nn.Linear(64, 10)}]
+$W\in\R^{10\times 64}$ (640 numbers) and $b\in\R^{10}$ (10 numbers): 650 parameters, the only layer with a bias in the whole network. Its input is the 64-dimensional pooled feature vector of each image, its output the 10 logits. This is the only fully connected (``feed-forward'') layer in the model: there is no hidden MLP head, no dropout.
+\end{repo}
+
+%-------------------------------------------------------------------
+\subsection{Tensors and the meaning of every axis}
+\label{sec:axes}
+
+\begin{idea}[NCHW]
+A batch of images is a 4-D tensor $X\in\R^{N\times C\times H\times W}$. I draw one image ($N$ fixed) as a box: width $W$ to the right, height $H$ upward, and \emph{depth} $C$ going into the page. Each depth slice $X[n,c,:,:]$ is one $H\times W$ \emph{feature map}; each depth fibre $X[n,:,h,w]$ is the $C$-vector describing location $(h,w)$.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}
+  \tensor{0}{0}{2.6}{2.6}{1.6}{c16}{$W$ (columns, axis 3)}{$H$ (rows, axis 2)}{$C$ (channels, axis 1)}
+  % one fibre
+  \draw[warn,line width=2pt] (1.3,1.3) -- ++(0.55*1.6,0.40*1.6);
+  \fill[warn] (1.3,1.3) circle (2pt);
+  \node[warn,font=\scriptsize,right] at (3.9,2.9) {fibre $X[n,:,h,w]\in\R^{C}$};
+  \draw[warn,->] (3.9,2.9) -- (2.0,1.85);
+  \node[font=\scriptsize,align=left,right] at (4.6,0.9) {stack $N$ such boxes\\$\Rightarrow$ batch axis 0};
+  % slice
+  \begin{scope}[shift={(8,0)}]
+    \fill[c16] (0,0) rectangle (2.6,2.6); \draw (0,0) rectangle (2.6,2.6);
+    \foreach \i in {0.325,0.65,...,2.6} {\draw[black!25] (\i,0) -- (\i,2.6); \draw[black!25] (0,\i) -- (2.6,\i);}
+    \draw (0,0) rectangle (2.6,2.6);
+    \node[below,font=\scriptsize] at (1.3,0) {one slice $X[n,c,:,:]\in\R^{H\times W}$};
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+
+\begin{repo}[axis meaning at each point of the pipeline]
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{3.3cm}>{\raggedright\arraybackslash}p{4.9cm}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+Where & Layout & dtype & Meaning \\
+\midrule
+\code{data.data} (torchvision) & $(50000,32,32,3)$ & \code{uint8} & images, \emph{HWC} order, values $0..255$ \\
+inside \code{augment} & $(32,32,3)\!\to\!(40,40,3)\!\to\!(32,32,3)$ & \code{uint8} & one image, still HWC \\
+output of \code{preprocess} & $(3,32,32)$ & \code{float32} & CHW, mean-subtracted \\
+a training batch & $(128,3,32,32)$ & \code{float32} & NCHW, what the model eats \\
+labels batch & $(128,)$ & \code{int64} & class index $0..9$ per image \\
+logits & $(128,10)$ & \code{float32} & one score per (image, class) \\
+\bottomrule
+\end{tabularx}
+\end{repo}
+
+%-------------------------------------------------------------------
+\subsection{2-D convolution}
+\label{sec:conv}
+
+\begin{idea}[what \texttt{nn.Conv2d} computes]
+A convolution layer with $C_\text{in}$ input channels, $C_\text{out}$ output channels, kernel size $K$, stride $S$ and zero padding $P$ has a weight tensor
+\[
+  \mathcal W \in \R^{C_\text{out}\times C_\text{in}\times K\times K}.
+\]
+Pad the input with $P$ zeros on every side, $\tilde X[n,c,a,b] = X[n,c,a-P,b-P]$ (zero outside the image). Then, with no bias,
+\[
+  \boxed{\;Y[n,o,i,j] \;=\; \sum_{c=0}^{C_\text{in}-1}\;\sum_{u=0}^{K-1}\;\sum_{v=0}^{K-1}
+  \mathcal W[o,c,u,v]\;\tilde X[n,\,c,\,S i+u,\,S j+v]\;}
+\]
+Strictly this is a cross-correlation (the kernel is not flipped). Deep-learning libraries call it convolution anyway. Since the weights are learned, the difference does not matter.
+
+Three facts to keep:
+\begin{enumerate}[nosep]
+  \item \textbf{Each filter $\mathcal W[o]$ is a $C_\text{in}\times K\times K$ block}, as deep as the input. It sums over \emph{all} input channels and produces \emph{one} 2-D map.
+  \item \textbf{The number of filters is the output depth.} $C_\text{out}$ filters give $C_\text{out}$ maps, stacked along axis~1. This is how depth ``is added''.
+  \item \textbf{Spatial size} follows from the window positions that fit:
+  \[
+    H_\text{out} = \left\lfloor \frac{H_\text{in} + 2P - K}{S} \right\rfloor + 1, \qquad W_\text{out}\text{ likewise.}
+  \]
+\end{enumerate}
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.9]
+  \tensor{0}{0}{3.2}{3.2}{1.4}{c16}{$W{=}32$}{$H{=}32$}{$C_\text{in}{=}16$}
+  \draw[warn,line width=1pt,fill=warn,fill opacity=0.25] (0.6,2.0) rectangle (1.2,2.6);
+  \draw[warn,line width=1pt] (0.6,2.6) -- ++(0.77,0.56) -- ++(0.6,0) -- ++(0,-0.6) -- (1.2,2.0);
+  \draw[warn,line width=1pt] (1.2,2.6) -- ++(0.77,0.56);
+  \node[warn,font=\scriptsize,align=center] at (1.6,-0.95) {$3{\times}3$ window through\\all 16 channels};
+  \tensor{5.0}{1.6}{0.6}{0.6}{1.4}{cK}{}{}{}
+  \node[font=\scriptsize,align=center] at (5.7,0.8) {filter $\mathcal W[o]$\\$16{\times}3{\times}3$\\$=144$ weights};
+  \node[font=\Large] at (4.3,1.9) {$\odot$};
+  \node[font=\Large] at (7.6,1.9) {$\Rightarrow$};
+  \begin{scope}[shift={(8.4,0)}]
+    \fill[c16!60] (0,0) rectangle (3.2,3.2); \draw (0,0) rectangle (3.2,3.2);
+    \fill[warn] (0.6,2.0) rectangle (0.9,2.3);
+    \node[font=\scriptsize,align=center] at (1.6,-0.95) {one map $Y[n,o]$, $32{\times}32$;\\each pixel = a 144-term\\dot product};
+  \end{scope}
+  \node[font=\small,align=center] at (12.6,1.9) {$\times C_\text{out}$\\$\Rightarrow$};
+  \tensor{13.4}{0}{3.2}{3.2}{1.4}{c16}{$32$}{}{$C_\text{out}{=}16$}
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Worked output-size examples (all convolutions in this repo use $K=3$, $P=1$).}
+\begin{align*}
+  S=1:&\quad H_\text{out}=\left\lfloor\tfrac{32+2-3}{1}\right\rfloor+1 = 31+1 = 32 &&\text{(``same'' padding: size preserved)}\\
+  S=1:&\quad \left\lfloor\tfrac{16+2-3}{1}\right\rfloor+1 = 16, \qquad \left\lfloor\tfrac{8+2-3}{1}\right\rfloor+1 = 8 \\
+  S=2:&\quad H_\text{out}=\left\lfloor\tfrac{32+2-3}{2}\right\rfloor+1 = \lfloor 15.5\rfloor+1 = 16 &&\text{(halved)}\\
+  S=2:&\quad \left\lfloor\tfrac{16+2-3}{2}\right\rfloor+1 = \lfloor 7.5\rfloor+1 = 8 .
+\end{align*}
+
+\begin{warn}[what stride 2 actually reads]
+With $K=3,P=1,S=2$ on a $32$-row input, output row $i$ reads padded rows $2i,2i{+}1,2i{+}2$, i.e.\ original rows $2i-1,\,2i,\,2i+1$. The window is \emph{centred on even input rows} $0,2,\dots,30$. The last output ($i=15$) reads original rows 29--31, so the padding row added at the bottom (and the column added on the right) is never touched. Only the top/left zero padding is used. The option-A shortcut (\cref{sec:shortcut}) samples $x[:,:,::2,::2]$, the same even positions, so the shortcut and the convolution branch stay spatially aligned.
+\end{warn}
+
+\begin{center}
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[scale=0.44]
+  \foreach \a in {0,...,33} {
+    \pgfmathsetmacro{\col}{(\a==0 || \a==33) ? "black!15" : "c16"}
+    \fill[\col] (\a,0) rectangle (\a+1,1); \draw[black!40] (\a,0) rectangle (\a+1,1);
+  }
+  \node[font=\tiny] at (0.5,0.5) {0}; \node[font=\tiny] at (33.5,0.5) {0};
+  \node[left,font=\scriptsize,align=right] at (0,0.5) {padded\\row $a$};
+  \foreach \i/\c/\h in {0/idea/1.3,1/repo/2.7,2/warn/4.1,15/shapec/1.3} {
+    \pgfmathsetmacro{\s}{2*\i}
+    \draw[\c,line width=1.3pt] (\s+0.05,\h) rectangle (\s+2.95,\h+0.6);
+    \draw[\c,densely dotted] (\s+0.05,1) -- (\s+0.05,\h); \draw[\c,densely dotted] (\s+2.95,1) -- (\s+2.95,\h);
+    \node[\c,font=\scriptsize,above] at (\s+1.5,\h+0.6) {output $i{=}\i$};
+  }
+  \node[font=\scriptsize] at (20,2.4) {$\cdots$};
+  \node[right,font=\scriptsize,align=left] at (34.3,0.5) {$\leftarrow$ bottom pad\\never read};
+  \foreach \a in {1,3,...,31} {\fill[black] (\a+0.5,-0.4) circle (3pt);}
+  \node[below,font=\scriptsize] at (17,-0.8) {black dots: window centres = original rows $0,2,\dots,30$ = exactly the rows that \code{x[:, :, ::2, ::2]} keeps};
+\end{tikzpicture}}
+\end{center}
+
+\begin{repo}[every convolution in the model]
+All convolutions are \code{nn.Conv2d(..., kernel\_size=3, padding=1, bias=False)}. There are exactly three kinds:
+\begin{center}
+\begin{tabular}{@{}lccccr@{}}
+\toprule
+kind & $C_\text{in}\to C_\text{out}$ & $S$ & $H_\text{in}\to H_\text{out}$ & weight shape & \#weights\\
+\midrule
+stem & $3\to16$ & 1 & $32\to32$ & $(16,3,3,3)$ & 432\\
+stage 1 (all 6) & $16\to16$ & 1 & $32\to32$ & $(16,16,3,3)$ & 2{,}304\\
+stage 2, first & $16\to32$ & 2 & $32\to16$ & $(32,16,3,3)$ & 4{,}608\\
+stage 2, other 5 & $32\to32$ & 1 & $16\to16$ & $(32,32,3,3)$ & 9{,}216\\
+stage 3, first & $32\to64$ & 2 & $16\to8$ & $(64,32,3,3)$ & 18{,}432\\
+stage 3, other 5 & $64\to64$ & 1 & $8\to8$ & $(64,64,3,3)$ & 36{,}864\\
+\bottomrule
+\end{tabular}
+\end{center}
+There is no $1{\times}1$ projection convolution anywhere. The shortcut has no parameters (\cref{sec:shortcut}). Depth changes in only three places: the stem ($3\to16$) and the first convolution of stages 2 and 3 ($16\to32$, $32\to64$), and each of those last two coincides with a stride-2 halving of the spatial size.
+\end{repo}
+
+\begin{warn}[why \texttt{bias=False}]
+Every convolution is immediately followed by batch normalisation, which subtracts the per-channel mean. A per-channel conv bias would be subtracted right back out, so it would be a wasted parameter. BN's own shift $\beta$ plays the role of the bias.
+\end{warn}
+
+%-------------------------------------------------------------------
+\subsection{Convolution \emph{is} a matrix multiplication (im2col)}
+\label{sec:im2col}
+
+\begin{idea}[unfold, multiply, fold]
+For one image, cut out every $C_\text{in}\times K\times K$ window that the filter visits, flatten each to a column of length $C_\text{in}K^2$, and line the columns up:
+\[
+  X_\text{col} \in \R^{(C_\text{in}K^2)\times(H_\text{out}W_\text{out})}.
+\]
+Flatten each filter into a row: $W_\text{mat} = \mathcal W.\text{reshape}(C_\text{out},\,-1) \in \R^{C_\text{out}\times(C_\text{in}K^2)}$. Then the whole convolution is one matrix product
+\[
+  \underbrace{Y_\text{mat}}_{C_\text{out}\times H_\text{out}W_\text{out}} = \underbrace{W_\text{mat}}_{C_\text{out}\times C_\text{in}K^2}\;\underbrace{X_\text{col}}_{C_\text{in}K^2\times H_\text{out}W_\text{out}},
+\]
+and reshaping $Y_\text{mat}$ to $(C_\text{out},H_\text{out},W_\text{out})$ gives the output maps. The inner dimension $C_\text{in}K^2$ is ``one window'', and summing over it is exactly the triple sum in the boxed formula above.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.8]
+  \matr{0.6}{0.9}{1.8}{1.2}{cK}{$W_\text{mat}$}{$C_\text{out}$}{$C_\text{in}K^2$}
+  \node at (2.9,1.5) {$\times$};
+  \matr{4.3}{-0.3}{5.6}{3.6}{c16}{$X_\text{col}$}{$C_\text{in}K^2$}{$H_\text{out}W_\text{out}$ (one column per output pixel)}
+  \node at (10.4,1.5) {$=$};
+  \matr{11.7}{0.9}{5.6}{1.2}{cG}{$Y_\text{mat}$}{$C_\text{out}$}{$H_\text{out}W_\text{out}$}
+  \draw[repo,line width=1pt] (5.3,-0.3) rectangle (5.6,3.3);
+  \node[repo,font=\scriptsize,below] at (5.45,-0.3) {one flattened $C_\text{in}{\times}3{\times}3$ window};
+  \draw[warn,line width=1pt] (12.7,0.9) rectangle (13.0,2.1);
+  \node[warn,font=\scriptsize,below] at (12.85,0.9) {all $C_\text{out}$ values of one pixel};
+\end{tikzpicture}
+\end{center}
+
+\begin{shapebox}[im2col sizes for this network, per image]
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+layer & $W_\text{mat}$ & $X_\text{col}$ & $Y_\text{mat}\to$ reshaped\\
+\midrule
+stem & $16\times 27$ & $27\times 1024$ & $16\times1024 \to (16,32,32)$\\
+stage-1 conv & $16\times 144$ & $144\times 1024$ & $16\times 1024\to(16,32,32)$\\
+stage-2 first conv ($S{=}2$) & $32\times 144$ & $144\times 256$ & $32\times256\to(32,16,16)$\\
+stage-2 conv & $32\times 288$ & $288\times 256$ & $32\times 256\to(32,16,16)$\\
+stage-3 first conv ($S{=}2$) & $64\times 288$ & $288\times 64$ & $64\times 64\to(64,8,8)$\\
+stage-3 conv & $64\times 576$ & $576\times 64$ & $64\times64\to(64,8,8)$\\
+\bottomrule
+\end{tabular}
+\end{center}
+For the stem: $27 = 3\cdot3\cdot3$ (RGB $\times$ $3{\times}3$ window) and $1024 = 32\cdot32$ output pixels. For a batch, do this for each of the $N$ images (or concatenate their columns: $X_\text{col}$ becomes $C_\text{in}K^2\times N H_\text{out}W_\text{out}$).
+\end{shapebox}
+
+\begin{warn}[implementation vs.\ mathematics]
+PyTorch on a GPU uses cuDNN, which picks among implicit-GEMM, Winograd and FFT algorithms and does not literally build $X_\text{col}$. The result is the same function up to floating-point rounding. Since the repo does not set \code{torch.backends.cudnn.deterministic}, two GPU runs with the same seed can differ in the last bits.
+\end{warn}
+
+\paragraph{Cost of a convolution.} Each output entry is a dot product of length $C_\text{in}K^2$, and there are $C_\text{out}H_\text{out}W_\text{out}$ entries, so a conv costs $C_\text{out}C_\text{in}K^2 H_\text{out}W_\text{out}$ multiply--adds (MACs) per image. A $16{\to}16$ conv at $32{\times}32$ costs $16\cdot16\cdot9\cdot1024 = 2{,}359{,}296$ MACs. A $32{\to}32$ conv at $16{\times}16$ costs $32\cdot32\cdot9\cdot256$, \emph{exactly the same number}, and so does $64{\to}64$ at $8{\times}8$. This is the ResNet design rule: \emph{when the feature map is halved, double the number of filters}, which keeps the time per layer constant.
+
+%-------------------------------------------------------------------
+\subsection{Batch normalisation}
+\label{sec:bn}
+
+\begin{idea}[normalise each channel over the batch, then re-scale]
+For a 4-D activation $A\in\R^{N\times C\times H\times W}$, \code{BatchNorm2d(C)} treats each channel $c$ separately and pools statistics over the $m = N\cdot H\cdot W$ values of that channel:
+\begin{align*}
+  \mu_c &= \frac1m\sum_{n,h,w} A[n,c,h,w], &
+  \sigma_c^2 &= \frac1m\sum_{n,h,w}\big(A[n,c,h,w]-\mu_c\big)^2, \\
+  \hat A[n,c,h,w] &= \frac{A[n,c,h,w]-\mu_c}{\sqrt{\sigma_c^2+\varepsilon}}, &
+  Y[n,c,h,w] &= \gamma_c\,\hat A[n,c,h,w] + \beta_c .
+\end{align*}
+$\gamma,\beta\in\R^{C}$ are learned and are broadcast as shape $(1,C,1,1)$. After normalisation each channel has mean 0 and variance $\approx1$ over the batch. $\gamma$ and $\beta$ then let the network choose any other scale and offset.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}
+  \tensor{0}{0}{2.4}{2.4}{1.8}{c16}{$W$}{$H$}{$C$}
+  % highlight one channel slice
+  \pgfmathsetmacro{\o}{0.55*0.6}\pgfmathsetmacro{\p}{0.40*0.6}
+  \fill[warn,opacity=0.35] (\o,\p) -- ++(2.4,0) -- ++(0,2.4) -- ++(-2.4,0) -- cycle;
+  \draw[warn,thick] (\o,\p) rectangle ++(2.4,2.4);
+  \node[warn,font=\scriptsize,align=left,right] at (4.0,1.5) {channel $c$ in image $n$:\\ $H\cdot W$ values};
+  \node[font=\scriptsize,align=left,right] at (4.0,0.4) {$\mu_c,\sigma_c^2$ pool this slice \emph{across all $N$ images}\\ $\Rightarrow m=N\cdot H\cdot W$ values per statistic};
+\end{tikzpicture}
+\end{center}
+
+\begin{repo}[PyTorch \texttt{BatchNorm2d} defaults, used as-is]
+$\varepsilon = 10^{-5}$, \code{momentum} $\alpha=0.1$, \code{affine=True} ($\gamma$ initialised to 1, $\beta$ to 0), \code{track\_running\_stats=True}. Each BN layer therefore has $2C$ parameters and three buffers: \code{running\_mean} $\in\R^C$, \code{running\_var} $\in\R^C$, \code{num\_batches\_tracked} (an integer).
+
+In \textbf{train mode} (\code{model.train()}), the batch statistics above are used, and the running buffers are updated after every forward pass:
+\[
+  r_\mu \leftarrow (1-\alpha)\,r_\mu + \alpha\,\mu_c, \qquad
+  r_{\sigma^2} \leftarrow (1-\alpha)\,r_{\sigma^2} + \alpha\,\tfrac{m}{m-1}\,\sigma_c^2 .
+\]
+Note the asymmetry. The \emph{normalisation} uses the biased variance ($\div m$), while the \emph{running estimate} stores the unbiased one ($\div(m-1)$).
+
+In \textbf{eval mode} (\code{model.eval()}), the batch is ignored and the running buffers are used. BN then becomes a fixed per-channel affine map (\cref{sec:evalbn}).
+
+How many values each statistic pools, for a full batch of 128 images:
+\begin{center}
+\begin{tabular}{@{}lcr@{}}
+\toprule
+where & activation shape & $m=N H W$\\
+\midrule
+stem BN and stage 1 & $(128,16,32,32)$ & $131{,}072$\\
+stage 2 & $(128,32,16,16)$ & $32{,}768$\\
+stage 3 & $(128,64,8,8)$ & $8{,}192$\\
+\bottomrule
+\end{tabular}
+\end{center}
+The last batch of each epoch is smaller (80 images on 50k, 72 on 45k), so its statistics are noisier, but $m$ is still in the thousands.
+\end{repo}
+
+\begin{warn}[forward hooks and \texttt{model.train()}]
+Because BN updates its running buffers on \emph{every} forward pass in train mode, even under \code{torch.no\_grad()}, a forward pass in the wrong mode changes the model. \file{scripts/check\_eval.py} tests exactly this: it runs 20 no-grad forward passes in train mode and then calls \code{evaluate}. \code{evaluate()} and \code{predict()} both call \code{model.eval()} first, and \code{train\_one\_epoch} calls \code{model.train()} first, so the training loop always switches modes correctly.
+\end{warn}
+
+%-------------------------------------------------------------------
+\subsection{ReLU}
+\label{sec:relu}
+
+\begin{idea}
+$\ReLU(z) = \max(0,z)$, element-wise, shape-preserving. Its derivative is $\mathbb 1[z>0]$ (PyTorch uses 0 at exactly $z=0$). It is the only non-linearity in the network.
+\end{idea}
+
+\begin{repo}
+One \code{nn.ReLU()} module per \code{BasicBlock} (used twice in \code{forward}), and one in \code{ResNetCIFAR} after the stem. Re-using one module object twice is safe because ReLU has no parameters or state. The \code{inplace} flag is left at its default \code{False}.
+\end{repo}
+
+%-------------------------------------------------------------------
+\subsection{Global average pooling and flatten}
+\label{sec:gap}
+
+\begin{idea}
+\code{nn.AdaptiveAvgPool2d(1)} picks its window so that the output is $1\times1$. On an $8\times8$ input that window is the whole map:
+\[
+  p[n,c] \;=\; \frac{1}{64}\sum_{h=0}^{7}\sum_{w=0}^{7} A[n,c,h,w], \qquad (N,64,8,8)\;\longrightarrow\;(N,64,1,1).
+\]
+\code{nn.Flatten(1,-1)} then merges axes 1--3: $(N,64,1,1)\to(N,64)$. It has no parameters and only changes the view.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}
+  \tensor{0}{0}{1.6}{1.6}{2.6}{c64}{$8$}{$8$}{$64$}
+  \draw[-{Stealth},thick] (3.3,1.2) -- (4.7,1.2) node[midway,above,font=\scriptsize,align=center]{mean over\\$8{\times}8$};
+  \tensor{5.1}{0.8}{0.2}{0.2}{2.6}{c64}{}{}{$64$}
+  \node[font=\scriptsize] at (5.9,0.3) {\shp{64,1,1}};
+  \draw[-{Stealth},thick] (7.2,1.2) -- (8.2,1.2) node[midway,above,font=\scriptsize]{flatten};
+  \matr{8.4}{1.05}{3.6}{0.3}{c64}{}{}{$p_n\in\R^{64}$}
+  \draw[-{Stealth},thick] (12.1,1.2) -- (13.1,1.2) node[midway,above,font=\scriptsize]{$Wp{+}b$};
+  \matr{13.2}{1.05}{0.9}{0.3}{cG}{}{}{$z_n\!\in\!\R^{10}$}
+\end{tikzpicture}
+\end{center}
+
+\begin{repo}
+Pooling throws away \emph{where} a feature fired and keeps only \emph{how strongly on average}. That is why the classifier needs just $64\times10$ weights rather than $64\cdot8\cdot8\times10 = 40{,}960$. There is no max-pooling anywhere in the network: downsampling is done only by stride-2 convolutions.
+\end{repo}
+
+%-------------------------------------------------------------------
+\subsection{Logits, softmax, cross-entropy and class selection}
+\label{sec:ce}
+
+\begin{idea}[from scores to a loss]
+The model outputs \emph{logits} $z\in\R^{10}$ per image: unnormalised scores, any real numbers. Softmax turns them into a probability vector:
+\[
+  s_k = \softmax(z)_k = \frac{e^{z_k}}{\sum_{j=0}^{9} e^{z_j}}, \qquad s_k>0,\quad \sum_k s_k = 1 .
+\]
+Adding the same constant to every logit leaves $s$ unchanged ($e^{z_k+c}/\sum e^{z_j+c}$). Libraries exploit this to stay numerically stable, using $\log s_k = z_k - \operatorname{logsumexp}(z)$ with $\operatorname{logsumexp}(z) = M + \log\sum_j e^{z_j-M}$, $M=\max_j z_j$.
+
+The cross-entropy loss for one example with true class $y$ is the negative log-probability of the correct class:
+\[
+  \ell(z,y) = -\log s_y = \operatorname{logsumexp}(z) - z_y ,
+\]
+and over a batch (PyTorch's default \code{reduction='mean'}):
+\[
+  \mathcal L = \frac1N\sum_{n=1}^{N}\ell(z_n,y_n).
+\]
+If the network is uninformed and outputs equal logits, $s_k = 1/10$ and $\ell = \ln 10 \approx 2.3026$. That is the loss to expect at initialisation.
+
+\textbf{Class selection.} The predicted class is $\hat y = \argmax_k z_k = \argmax_k s_k$. Softmax is monotonic, so it is not needed to pick the class, only to report a probability.
+\end{idea}
+
+\begin{repo}[three places that turn logits into decisions]
+\begin{itemize}[nosep]
+  \item \textbf{Training/eval loss:} \code{nn.CrossEntropyLoss()} takes \emph{raw logits} $(N,10)$ and \code{int64} targets $(N,)$. Internally it is \code{log\_softmax} followed by negative log-likelihood. The model therefore has no softmax layer: putting one in would apply softmax twice.
+  \item \textbf{Accuracy:} \code{torch.argmax(logits, dim=1) == label} in \code{train\_one\_epoch} and \code{evaluate}. \code{dim=1} is the class axis, giving shape $(N,)$.
+  \item \textbf{Probabilities:} \code{torch.softmax(logits, dim=1)} in \code{predict()} (evaluation report) and in the service, which then takes \code{torch.topk(probs, 3)} and returns the three largest $(s_k, k)$ pairs.
+\end{itemize}
+\end{repo}

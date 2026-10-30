@@ -1,0 +1,48 @@
+\input{preamble}
+\usepackage{cancel}
+\begin{document}
+\begin{titlepage}
+\centering
+\vspace*{2.2cm}
+{\Huge\bfseries ResNet-20 on CIFAR-10, End to End\par}
+\vspace{0.4cm}
+{\Large A shape-by-shape refresher of the \texttt{resnet-cifar10} repository\par}
+\vspace{1.2cm}
+\begin{tikzpicture}[scale=0.62]
+  \tensor{0}{0}{3.2}{3.2}{0.3}{cIn}{}{}{$3$}
+  \tensor{4.2}{0}{3.2}{3.2}{0.8}{c16}{}{}{$16$}
+  \tensor{8.8}{0.8}{1.6}{1.6}{1.6}{c32}{}{}{$32$}
+  \tensor{12.4}{1.2}{0.8}{0.8}{3.2}{c64}{}{}{$64$}
+  \matr{16.6}{1.45}{0.3}{0.3}{cG}{}{}{$10$}
+  \foreach \a/\b in {3.7/4.1,8.2/8.7,11.4/12.3,15.4/16.5} \draw[-{Stealth},thick] (\a,1.6) -- (\b,1.6);
+\end{tikzpicture}
+\vspace{1.2cm}
+
+{\large Lasfer Mohammed Djawed\par}
+\vspace{0.2cm}
+{\normalsize \href{https://github.com/fyl3x/resnet-cifar10}{\texttt{github.com/fyl3x/resnet-cifar10}}\par}
+\vspace{0.2cm}
+{\normalsize October 2026\par}
+\vfill
+\begin{minipage}{0.86\linewidth}\small
+This document explains every step of the project: raw bytes, augmentation, normalisation, batching, every convolution, normalisation and shortcut, the logits and the loss, back-propagation through each operation, the optimiser, the schedule, evaluation and serving. It gives the shape of every tensor and the formula behind every number. The repository code is the source of truth: each claim about ``what the code does'' was checked against \texttt{cifar\_resnet/}, \texttt{scripts/} and \texttt{service/}, and the numerical examples were produced by running the trained checkpoint \texttt{model/resnet20.pt} on \texttt{samples/test0.png}. Reference: K.~He, X.~Zhang, S.~Ren, J.~Sun, \emph{Deep Residual Learning for Image Recognition}, CVPR 2016, \href{https://arxiv.org/abs/1512.03385}{arXiv:1512.03385}.
+\end{minipage}
+\vspace{0.8cm}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+\input{sec_overview}
+\input{sec_data}
+\input{sec_toolkit}
+\input{sec_block}
+\input{sec_arch}
+\input{sec_forward}
+\input{sec_backprop}
+\input{sec_optim}
+\input{sec_eval}
+\clearpage
+\input{sec_serving}
+\clearpage
+\input{sec_appendix}
+\end{document}

@@ -1,0 +1,213 @@
+\section{Optimisation: SGD, the schedule and the training loop}
+\label{sec:optim}
+
+\subsection{The optimiser}
+\label{sec:sgd}
+
+\begin{repo}[\texttt{scripts/train\_resnet.py}]
+\begin{lstlisting}[firstnumber=56]
+optim = torch.optim.SGD(params=model.parameters(),lr=0.1,momentum=0.9,weight_decay=1e-4)
+loss_fct = nn.CrossEntropyLoss()
+\end{lstlisting}
+One parameter group containing all 269{,}722 parameters, with \code{dampening=0} and \code{nesterov=False} (defaults).
+\end{repo}
+
+\begin{idea}[the exact update PyTorch performs]
+At step $t$, for every parameter tensor $\theta$ (all shapes are the parameter's own shape):
+\begin{align*}
+  g_t &= \nabla_\theta\mathcal L(\theta_t) + \lambda\,\theta_t && \text{weight decay folded into the gradient}\\
+  v_t &= \begin{cases} g_t & t=1\\ \mu\,v_{t-1} + g_t & t>1\end{cases} && \text{momentum buffer (velocity)}\\
+  \theta_{t+1} &= \theta_t - \eta_t\,v_t && \text{step}
+\end{align*}
+with $\mu=0.9$, $\lambda=10^{-4}$ and $\eta_t$ from the schedule. The momentum buffer is initialised to the first gradient, not to zero. Unrolled, $v_t=\sum_{k\le t}\mu^{t-k}g_k$ is an exponentially weighted sum of past gradients with an effective memory of $1/(1-\mu)=10$ steps. Under a constant gradient $g$, $v\to g/(1-\mu)=10g$, so \textbf{the effective step size is $10\eta$}: $1.0$, then $0.1$, then $0.01$.
+\end{idea}
+
+\begin{warn}[two momentum conventions]
+Some papers and frameworks (e.g.\ Sutskever et al.\ 2013, Caffe) put the learning rate \emph{inside} the velocity, $v_t=\mu v_{t-1}-\eta_t g_t$, $\theta_{t+1}=\theta_t+v_t$. With a constant $\eta$ the two are identical ($v^\text{Caffe}=-\eta\,v^\text{PyTorch}$). They differ only at a learning-rate drop. In PyTorch the stored velocity is unchanged and gets multiplied by the new, smaller $\eta$, so the step shrinks $10\times$ immediately. In the other form the old velocity still carries the old $\eta$ and fades over $\sim$20 steps. Over 16{,}000-iteration phases the difference is negligible, but it is worth knowing when reading other code.
+\end{warn}
+
+\begin{repo}[one step verified]
+Three steps of the update above, written out by hand, reproduce \code{torch.optim.SGD(lr=0.1, momentum=0.9, weight\_decay=1e-4)} to within $4\times10^{-6}$ (\code{float32}). The optimiser state is one momentum buffer per parameter tensor, with the same shape, i.e.\ another 269{,}722 numbers. That is why the training checkpoints (2.2\,MB) are twice the size of the exported serving weights (1.1\,MB).
+\end{repo}
+
+\subsection{Weight decay}
+\label{sec:wd}
+
+\begin{idea}[L2 regularisation, and what it does with BN]
+Adding $\lambda\theta$ to the gradient is gradient descent on
+\[
+  \mathcal L(\theta) + \tfrac{\lambda}{2}\|\theta\|_2^2 ,
+\]
+so with plain SGD, ``weight decay'' and ``L2 penalty'' are the same thing. (They differ only for adaptive optimisers like Adam, hence AdamW.) Each step shrinks every weight by the factor $(1-\eta\lambda)$ before the gradient step: $1-10^{-5}$ per step at $\eta=0.1$.
+
+In a network where every conv is followed by BN, the conv's output is invariant to rescaling its weights ($\BN(\alpha\,\mathcal W*x)=\BN(\mathcal W*x)$ for $\alpha>0$). The penalty therefore does not change the function, but it keeps $\|\mathcal W\|$ small, and a small $\|\mathcal W\|$ makes the same $\eta$ a \emph{larger relative} step. Weight decay on BN-ed convs acts largely as a control on the effective learning rate.
+\end{idea}
+
+\begin{repo}[applied to every parameter]
+Because \code{model.parameters()} goes into a single group, decay applies to conv weights, BN $\gamma$ \emph{and} $\beta$, and the linear weight and bias alike. The paper does not say whether BN parameters were excluded; many reimplementations decay everything, as here. Measured on the final model: $\|\theta\|_2^2 = 3218.6$, so the penalty term is $\tfrac{\lambda}{2}\|\theta\|^2 = 0.161$. At the end of training the data loss is $0.024$, so \textbf{the regulariser is about $6.6\times$ the data term} of the objective SGD is actually minimising. Its visible fingerprint is stem channel 0 (\cref{sec:forward}): its filter norm decayed to $0.047$ and its $\gamma$ to $0.011$, a channel the data did not defend.
+\end{repo}
+
+\subsection{The learning-rate schedule}
+\label{sec:schedule}
+
+\begin{lstlisting}[firstnumber=60]
+def lr_at(iteration):
+    if iteration < 32000:
+        return 0.1
+    elif iteration < 48000:
+        return 0.01
+    else:
+        return 0.001
+def set_lr(optimizer,lr):
+    for p in optimizer.param_groups:
+        p["lr"] = lr
+\end{lstlisting}
+
+\begin{idea}[step decay, counted in iterations]
+$\eta_t = 0.1\cdot 10^{-\,[t\ge32000]-[t\ge48000]}$, where $t$ is the number of optimiser steps already taken. The paper specifies the schedule in iterations (``divide it by 10 at 32k and 48k iterations, and terminate training at 64k iterations''), independent of the dataset size, which is why the repo counts iterations, not epochs.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=0.92\linewidth,height=4.2cm,ymode=log,xmin=0,xmax=64000,ymin=0.0005,ymax=0.2,
+  xlabel={iteration $t$},ylabel={$\eta_t$},xtick={0,16000,32000,48000,64000},
+  xticklabels={0,16k,32k,48k,64k},ytick={0.001,0.01,0.1},yticklabels={0.001,0.01,0.1},
+  grid=major,grid style={black!10},tick label style={font=\scriptsize},label style={font=\small},scaled x ticks=false,
+  extra x ticks={32000,48000},extra x tick labels={},extra x tick style={grid style={warn,dashed}}]
+  \addplot[const plot,very thick,idea] coordinates {(0,0.1) (32000,0.01) (48000,0.001) (64000,0.001)};
+  \node[font=\scriptsize,align=center] at (axis cs:16000,0.03) {32{,}000 steps at 0.1\\(epochs 1--82 on 50k)};
+  \node[font=\scriptsize,align=center] at (axis cs:40000,0.0032) {16{,}000 at 0.01\\(epochs 82--123)};
+  \node[font=\scriptsize,align=center] at (axis cs:56000,0.0032) {16{,}000 at 0.001\\(epochs 123--164)};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
+\begin{repo}[iterations $\leftrightarrow$ epochs]
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+run & iters/epoch & 1st drop (32k) & 2nd drop (48k) & end (64k) & last epoch\\
+\midrule
+final (50k) & 391 & during epoch 82 & during epoch 123 & epoch 164 & 267 iterations\\
+development (45k) & 352 & during epoch 91 & during epoch 137 & epoch 182 & 288 iterations\\
+\bottomrule
+\end{tabular}
+\end{center}
+$64{,}000\times128 = 8{,}192{,}000$ examples are seen, $163.84$ passes over 50k (counting the short last batch of each epoch as a full step, which is what the loop does). $163\cdot391=63{,}733$ iterations finish 163 epochs, and epoch 164 stops after $267$ more, exactly as in \file{artifacts/logs/final\_res20.csv} (last row: epoch 164, iteration 64{,}000). The learning rate is set \emph{before} every step from the current count, so step 0 through step 31{,}999 use 0.1 (\file{check\_schedule.py} tests the boundaries 31999/32000 and 47999/48000). Every BN layer's \code{num\_batches\_tracked} in the checkpoint reads exactly \textbf{64{,}000}: one train-mode forward per optimiser step, with no extra ones.
+\end{repo}
+
+\subsection{The training loop}
+\label{sec:loop}
+
+\begin{lstlisting}[firstnumber=33]
+def train_one_epoch(model,loader,optimizer,loss_fn,device,iteration,max_iterations):
+    model.train()
+    num_exmpl  = 0
+    correct_pred = 0
+    loss_cum = 0
+    iterer = iteration
+    for image,label in loader:
+        image = image.to(device)
+        label = label.to(device)
+        if iterer >= max_iterations:
+             break
+        set_lr(optimizer, lr_at(iterer))
+        logits,loss = train_step(model=model,x=image,y=label,optimizer=optimizer,loss_fn=loss_fn)
+        compare = (torch.argmax(logits,dim=1) == label)
+        compare = compare.sum().item()
+        correct_pred+= compare
+        iterer+=1
+        num_exmpl += logits.shape[0]
+        loss_cum+=loss*logits.shape[0]
+    loss_cum /= num_exmpl
+    correct_pred /= num_exmpl
+    return loss_cum,correct_pred,iterer
+\end{lstlisting}
+
+\begin{center}
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[
+  n/.style={draw=ink,rounded corners=2pt,fill=#1,font=\footnotesize,minimum height=1.3cm,align=center,inner sep=3pt,text width=2.6cm},
+  n/.default=white, ar/.style={-{Stealth[length=2mm]},thick}]
+  \node[n=cIn] (a) at (0,0) {next batch\\$X$ \shp{128,3,32,32}\\$y$ \shp{128}};
+  \node[n=cIn] (b) at (3.4,0) {\code{.to("cuda")}\\stop if $t\ge64000$};
+  \node[n=cK] (c) at (6.8,0) {$\eta\leftarrow$ \code{lr\_at}$(t)$};
+  \node[n=c32] (d) at (10.2,0) {\code{zero\_grad}\\forward, $\mathcal L$\\backward, step};
+  \node[n=cG] (e) at (13.6,0) {sum \#correct\\and $\mathcal L\cdot|B|$\\$t\leftarrow t+1$};
+  \foreach \p/\q in {a/b,b/c,c/d,d/e} \draw[ar] (\p) -- (\q);
+  \draw[ar] (e.south) -- ++(0,-0.45) -| (a.south);
+  \node[font=\footnotesize,fill=white] at (6.8,-1.1) {391 times per epoch; then \code{evaluate()} on validation (dev runs) and one CSV row};
+\end{tikzpicture}}
+\end{center}
+
+\begin{repo}[what the logged training metrics mean]
+\begin{itemize}[nosep]
+  \item \textbf{train\_loss}: $\sum_\text{batches}\mathcal L_B\,|B|\big/\sum|B|$, the exact per-example average over the epoch, correct also for the short last batch.
+  \item \textbf{train\_acc}: computed from the logits of each step's forward pass, i.e.\ on \emph{augmented} images, with \emph{train-mode} BN, and \emph{before} that step's update. The model changes during the epoch, so this is a running average, not the accuracy of the end-of-epoch model. The README's ``train error'' column (e.g.\ 0.52\% for ResNet-20) is this quantity at the last epoch.
+  \item \textbf{val\_loss / val\_acc}: from \code{evaluate()} after the epoch, in eval mode, on un-augmented validation images. Empty in the \code{--full} run, which has no validation set.
+  \item \textbf{lr}: read from \code{optim.param\_groups[0]["lr"]} after the epoch, i.e.\ the rate of its last step.
+\end{itemize}
+\end{repo}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[width=0.95\linewidth,height=6.2cm,xmin=0,xmax=64000,ymin=0,ymax=30,
+  xlabel={iteration},ylabel={error (\%)},xtick={0,16000,32000,48000,64000},xticklabels={0,16k,32k,48k,64k},scaled x ticks=false,
+  grid=major,grid style={black!10},tick label style={font=\scriptsize},label style={font=\small},
+  legend style={font=\scriptsize,at={(0.98,0.97)},anchor=north east,draw=black!20},legend cell align=left]
+  \addplot[idea,thick] table[col sep=comma,x=iteration,y expr={100*(1-\thisrow{train_acc})}] {logs/final_res20.csv};
+  \addlegendentry{final run (50k): train error (augmented, train mode)}
+  \addplot[warn,thick] table[col sep=comma,x=iteration,y expr={100*(1-\thisrow{val_acc})}] {logs/dev_res20.csv};
+  \addlegendentry{development run (45k): validation error}
+  \addplot[warn!50,thin] table[col sep=comma,x=iteration,y expr={100*(1-\thisrow{train_acc})}] {logs/dev_res20.csv};
+  \addlegendentry{development run (45k): train error}
+  \draw[black!50,dashed] (axis cs:32000,0) -- (axis cs:32000,30);
+  \draw[black!50,dashed] (axis cs:48000,0) -- (axis cs:48000,30);
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
+The two learning-rate drops are the most visible events in training. At the first drop, the development run's validation error falls from $17.6\%$ (epoch 90, $\eta=0.1$, noisy) to $9.8\%$ one epoch later and $8.8\%$ the epoch after. The second drop gives a smaller, final improvement. At $\eta=0.1$ the validation curve is noisy because the effective step ($10\eta=1$) keeps the weights bouncing around a wide region. Smaller steps let SGD settle into it. The final run takes 2{,}182\,s ($\approx36$ minutes) on an RTX 3050, about 13\,s per epoch.
+
+\subsection{Seeds, checkpoints and the run script}
+
+\begin{repo}[sources of randomness, and what controls each]
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{3.2cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+\toprule
+randomness & generator & seeded by\\
+\midrule
+weight initialisation & PyTorch global RNG & \code{torch.manual\_seed(args.seed)}, before the model is built\\
+batch order & \code{torch.Generator g} passed to the loader & \code{g.manual\_seed(args.seed)}\\
+crop offsets and flips & \code{np.random.default\_rng} in the dataset & \code{seed=args.seed}\\
+train/val split & local \code{torch.Generator} & literal 0\\
+GPU kernels & cuDNN algorithm choice & \emph{not controlled}\\
+\bottomrule
+\end{tabularx}
+\end{center}
+All reported runs use seed 0. Without \code{torch.backends.cudnn.deterministic=True}, re-running is reproducible up to floating-point noise, not bit-for-bit.
+\end{repo}
+
+\begin{repo}[checkpoints]
+\code{save\_checkpoint} writes one dictionary,
+\begin{center}\code{\{"model": state\_dict, "optimizer": state\_dict, "iteration": t, "seed": s\}},\end{center}
+\emph{once}, at the end of training. Nothing is saved per epoch, so an interrupted run restarts from scratch. \code{load\_checkpoint} restores the model, restores the optimiser only if one is passed (the service passes \code{None}), and returns \code{(iteration, seed)}. \file{scripts/export\_model.py} re-saves the final weights without the optimiser state as \file{model/resnet20.pt} (1{,}121{,}617 bytes, 116 \code{state\_dict} entries) and copies the 50k mean next to it. Those two files are all the service needs.
+\end{repo}
+
+\begin{repo}[command line]
+\code{python -m scripts.train\_resnet --name final\_res20 --full} for the headline model; \code{--n 9} for ResNet-56; \code{--plain} for the plain networks; \code{--max-iters} to shorten a run. The device is hard-coded to \code{"cuda"}.
+\end{repo}
+
+\subsection{Sanity checks that were run before the full training}
+
+\begin{repo}[\texttt{scripts/}]
+\begin{itemize}[nosep]
+  \item \file{overfit\_batch.py}: 200 steps on one fixed batch of 128. A correct model, loss and optimiser must drive this to $\approx100\%$ training accuracy. If they cannot, something is broken before any hyperparameter matters. The first loss should be $\approx\ln10=2.30$. One random batch at initialisation gives $2.42$, slightly above because of the randomly initialised linear layer.
+  \item \file{check\_model.py}: parameter counts for $n=3$ and $9$, residual and plain; output shape \shp{128,10}; initial weight standard deviations.
+  \item \file{check\_schedule.py}: \code{lr\_at} on both sides of each boundary.
+  \item \file{check\_checkpoint.py}: train 20 steps, save, load into a fresh model, and verify identical \code{state\_dict}s and identical validation metrics.
+  \item \file{check\_eval.py}: train-mode forward passes followed by \code{evaluate()}, which must switch BN to eval mode.
+  \item \file{check\_loader.py}, \file{check\_split.py}, \file{check\_mean.py}, \file{check\_augment.py}: data pipeline determinism and shapes, with the augmentation grid saved to \file{artifacts/aug\_grid.png}.
+\end{itemize}
+\end{repo}

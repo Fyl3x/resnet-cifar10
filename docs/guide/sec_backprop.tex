@@ -1,0 +1,233 @@
+\section{Back-propagation through every operation}
+\label{sec:backprop}
+
+\subsection{The rule that organises everything}
+
+\begin{idea}[chain rule, written with shapes]
+Write $G_T \coloneqq \partial\mathcal L/\partial T$ for any tensor $T$ in the computation. Since $\mathcal L$ is a scalar, \textbf{$G_T$ always has exactly the shape of $T$}. For an operation $Y=f(X)$, back-propagation receives $G_Y$ and must produce $G_X$:
+\[
+  G_X[\alpha] \;=\; \sum_\beta \dd{Y[\beta]}{X[\alpha]}\;G_Y[\beta]
+  \qquad\big(\text{i.e.\ } G_X = J_f\T G_Y\text{ with everything flattened}\big).
+\]
+In practice nobody builds $J_f$, which for one $16{\to}16$ conv on a batch would be a $2.1\text{M}\times2.1\text{M}$ matrix. Each op gets a hand-derived rule that maps $G_Y$ to $G_X$ (and to $G_\theta$ for its parameters). When a tensor is used twice (the block input $x$ feeds both the branch and the shortcut), \textbf{its gradients add}.
+\end{idea}
+
+The backward pass visits the forward graph in reverse:
+\begin{center}
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[
+  n/.style={draw=ink,rounded corners=2pt,fill=#1,font=\footnotesize,minimum height=0.7cm,minimum width=1.3cm,align=center,inner sep=3pt},
+  n/.default=white, ar/.style={-{Stealth[length=2mm]},thick}, br/.style={-{Stealth[length=2mm]},thick,warn}]
+  \foreach \nm/\lab/\col/\xx in {x/{$X$}/cIn/0,st/stem/cK/2,s1/{stage 1}/c16/4,s2/{stage 2}/c32/6,s3/{stage 3}/c64/8,gap/GAP/white/10,lin/linear/cK/12,ce/CE/cG/14,L/{$\mathcal L$}/white/15.8}
+    \node[n=\col] (\nm) at (\xx,0) {\lab};
+  \foreach \a/\b in {x/st,st/s1,s1/s2,s2/s3,s3/gap,gap/lin,lin/ce,ce/L} \draw[ar] (\a) -- (\b);
+  \node[font=\scriptsize,above] at (8,0.5) {forward};
+  \foreach \a/\b/\t in {L/ce/{$1$},ce/lin/{$G_Z$\\\shp{N,10}},lin/gap/{$G_p$\\\shp{N,64}},gap/s3/{\shp{N,64,8,8}},s3/s2/{\shp{N,32,16,16}},s2/s1/{\shp{N,16,32,32}},s1/st/{\shp{N,16,32,32}}}
+    \draw[br] (\a.south) to[bend left=40] node[below,font=\scriptsize,align=center,warn]{\t} (\b.south);
+  \node[font=\scriptsize,warn] at (8,-2.0) {backward: each arrow carries $G$ of the tensor at that point, same shape as the forward tensor};
+\end{tikzpicture}}
+\end{center}
+
+\subsection{Cross-entropy with softmax: the gradient on the logits}
+\label{sec:cegrad}
+
+\begin{idea}[derivation]
+For one example, $\ell = \operatorname{logsumexp}(z) - z_y$. Since $\partial\operatorname{logsumexp}(z)/\partial z_k = e^{z_k}/\sum_je^{z_j} = s_k$,
+\[
+  \dd{\ell}{z_k} = s_k - \mathbb 1[k=y].
+\]
+With the batch mean $\mathcal L=\frac1N\sum_n\ell_n$:
+\[
+  \boxed{\,G_Z = \tfrac1N\,(S - Y_\text{onehot})\,}\qquad S,\;Y_\text{onehot},\;G_Z\in\R^{N\times10}.
+\]
+The gradient on the logits is ``predicted probability minus target'', divided by the batch size. Each row sums to zero. The correct class is pushed up by $1-s_y$, and every wrong class is pushed down by its own probability.
+\end{idea}
+
+\begin{repo}[on \texttt{test0.png}, $N=1$]
+$G_z = s - e_3 = (6.7{\times}10^{-13},\,3.6{\times}10^{-11},\,6.0{\times}10^{-11},\,\mathbf{-1.58{\times}10^{-7}},\,\dots,\,1.55{\times}10^{-7}\,(\text{dog}),\,\dots)$. Almost no gradient: a confidently correct example teaches the model nothing more. During training the batch average is dominated by the hard and misclassified examples.
+\end{repo}
+
+\subsection{Linear layer}
+
+\begin{idea}[three matrix products, each shape-checked]
+Forward $Z = PW\T + \mathbf 1 b\T$ with $P\in\R^{N\times64}$, $W\in\R^{10\times64}$. Then
+\begin{align*}
+  G_W &= G_Z\T\,P &&(10\times N)(N\times64) = (10\times64) \;\checkmark\;\text{same as }W\\
+  G_b &= G_Z\T\,\mathbf 1_N = \textstyle\sum_n G_Z[n,:] &&(10)\\
+  G_P &= G_Z\,W &&(N\times10)(10\times64) = (N\times64)\;\checkmark\;\text{same as }P
+\end{align*}
+The mnemonic: \emph{the gradient of a matrix product with respect to one factor is the upstream gradient multiplied by the transpose of the other factor, placed on whichever side makes the shapes fit}. The sum over the batch in $G_W$ and $G_b$ is the inner dimension $N$ disappearing: the parameter gradient accumulates over all examples.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.75]
+  \matr{0.5}{0.75}{2.4}{0.9}{cK}{$G_Z\T$}{$10$}{$N$}
+  \node at (3.3,1.2) {$\cdot$};
+  \matr{4.3}{0}{2.4}{2.4}{c64}{$P$}{$N$}{$64$}
+  \node at (7.1,1.2) {$=$};
+  \matr{8.0}{0.75}{2.4}{0.9}{cG}{$G_W$}{$10$}{$64$}
+  \begin{scope}[shift={(12.2,0)}]
+  \matr{0.5}{0}{0.9}{2.4}{cG}{$G_Z$}{$N$}{$10$}
+  \node at (1.8,1.2) {$\cdot$};
+  \matr{2.8}{0.75}{2.4}{0.9}{cK}{$W$}{$10$}{$64$}
+  \node at (5.6,1.2) {$=$};
+  \matr{6.4}{0}{2.4}{2.4}{cG}{$G_P$}{$N$}{$64$}
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+
+\subsection{Flatten and global average pooling}
+
+\begin{idea}
+Flatten backward is a reshape: $G\in\R^{N\times64}\to\R^{N\times64\times1\times1}$. GAP averaged 64 positions with weight $1/64$ each, so each position receives $1/64$ of the gradient:
+\[
+  G_A[n,c,h,w] = \tfrac{1}{64}\,G_p[n,c], \qquad \shp{N,64}\;\xrightarrow{\text{broadcast}}\;\shp{N,64,8,8}.
+\]
+Every location of a stage-3 feature map gets the same gradient. GAP does not care where the evidence was.
+\end{idea}
+
+\subsection{ReLU}
+
+\begin{idea}
+$G_z = G_y\odot\mathbb 1[z>0]$. Gradient flows unchanged through active units and is blocked at inactive ones. Autograd needs to remember only the output (or the mask), not the input.
+\end{idea}
+
+\subsection{The residual addition and the option-A shortcut}
+\label{sec:shortcut-back}
+
+\begin{idea}[an addition copies the gradient to both inputs]
+For $u=\mathcal F(x)+s(x)$: $\partial u/\partial\mathcal F = I$ and $\partial u/\partial s = I$, so $G_\mathcal F = G_u$ and $G_s = G_u$. Then
+\[
+  G_x = \underbrace{\big(\text{branch backward of }G_u\big)}_{\text{through 2 convs, 2 BNs, 1 ReLU}} \;+\; \underbrace{\big(\text{shortcut backward of }G_u\big)}_{\text{identity: just }G_u} .
+\]
+This is the ``gradient highway'' of \cref{sec:whyres}, now concretely: the shortcut contributes $G_u$ itself to $G_x$, untouched by any weight.
+\end{idea}
+
+\begin{repo}[backward of \texttt{F.pad(x[:,:,::2,::2], (0,0,0,0,8,8))}]
+Run the two forward steps backwards. With $G_s\in\R^{N\times32\times16\times16}$:
+\begin{enumerate}[nosep]
+  \item \textbf{Pad backward = slice.} The zero channels did not depend on $x$, so their gradient is discarded: $G_\text{sub} = G_s[:,\,8{:}24,\,:,\,:]\in\R^{N\times16\times16\times16}$.
+  \item \textbf{Strided slice backward = scatter.} Allocate $G\in\R^{N\times16\times32\times32}$ filled with zeros and write $G[:,:,::2,::2] = G_\text{sub}$.
+\end{enumerate}
+So the shortcut sends gradient only to the even-row, even-column positions of the input (a quarter of them) and only from the middle 16 output channels. The other three quarters of the positions get gradient only through the residual branch's stride-2 convolution.
+\end{repo}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.35]
+  \foreach \i in {0,...,7} \foreach \j in {0,...,7} {
+    \pgfmathtruncatemacro{\ev}{(mod(\i,2)==0 && mod(\j,2)==0) ? 1 : 0}
+    \ifnum\ev=1 \fill[repo!55] (\j,-\i) rectangle ++(1,1); \else \fill[black!6] (\j,-\i) rectangle ++(1,1); \fi
+    \draw[black!30] (\j,-\i) rectangle ++(1,1);
+  }
+  \node[font=\scriptsize,align=center,below] at (4,-7.3) {$G_x$ from the shortcut ($8{\times}8$ corner of $32{\times}32$):\\green = receives $G_\text{sub}$, grey = 0};
+  \foreach \i in {0,...,3} \foreach \j in {0,...,3} {\fill[repo!55] (14+\j,-\i-2) rectangle ++(1,1); \draw[black!30] (14+\j,-\i-2) rectangle ++(1,1);}
+  \node[font=\scriptsize,below,align=center] at (16,-5.3) {$G_\text{sub}$ ($4{\times}4$ corner of $16{\times}16$)};
+  \draw[-{Stealth},thick] (13.6,-1.5) to[bend right=20] node[above,font=\scriptsize]{scatter to $(2i,2j)$} (8.4,-0.5);
+\end{tikzpicture}
+\end{center}
+
+\subsection{Batch normalisation (train mode)}
+\label{sec:bnback}
+
+\begin{idea}[derivation in four lines]
+Fix a channel and drop the index $c$. Write $m=NHW$, $\hat a_k=(a_k-\mu)/\sigma_\varepsilon$ with $\sigma_\varepsilon=\sqrt{\sigma^2+\varepsilon}$, and $y_k=\gamma\hat a_k+\beta$, for $k$ running over the $m$ positions. The parameter gradients are immediate:
+\[
+  G_\gamma = \sum_{k=1}^m G_{y_k}\,\hat a_k, \qquad G_\beta = \sum_{k=1}^m G_{y_k}.
+\]
+For the input, $\mu$ and $\sigma^2$ depend on \emph{every} $a_k$ in the channel, so each $a_k$ affects every $y_j$. Using $\partial\mu/\partial a_k = 1/m$ and $\partial\sigma^2/\partial a_k = 2(a_k-\mu)/m$ and collecting terms:
+\[
+  \boxed{\;G_{a_k} = \frac{\gamma}{m\,\sigma_\varepsilon}\Big(m\,G_{y_k} \;-\; \sum_{j}G_{y_j} \;-\; \hat a_k\sum_j G_{y_j}\hat a_j\Big)\;}
+\]
+The upstream gradient is centred (its mean over the channel is removed), and its component along $\hat a$ is removed, then rescaled by $\gamma/\sigma_\varepsilon$. Hence a BN layer cannot pass back a gradient that would merely shift or rescale its input channel. Those directions are taken over by $\beta$ and $\gamma$.
+\end{idea}
+
+\begin{shapebox}[BN backward]
+$G_y, G_a\in\R^{N\times C\times H\times W}$. The sums run over axes $(0,2,3)$ and give shape \shp{C}, broadcast back as \shp{1,C,1,1}. $G_\gamma,G_\beta\in\R^{C}$. In eval mode BN is the fixed affine $y=a_cx+b_c$, so its backward would be simply $G_x=a_c\,G_y$. Training never back-propagates in eval mode, though.
+\end{shapebox}
+
+\subsection{Convolution}
+\label{sec:convback}
+
+\begin{idea}[two gradients, both are convolutions again]
+From $Y[n,o,i,j]=\sum_{c,u,v}\mathcal W[o,c,u,v]\,\tilde X[n,c,Si{+}u,Sj{+}v]$:
+
+\textbf{Weight gradient}: correlate the (padded) input with the output gradient, summing over the batch:
+\[
+  G_\mathcal W[o,c,u,v] = \sum_{n}\sum_{i,j} G_Y[n,o,i,j]\;\tilde X[n,c,\,Si+u,\,Sj+v].
+\]
+\textbf{Input gradient}: every input pixel collects gradient from every output window that contained it:
+\[
+  G_{\tilde X}[n,c,a,b] = \sum_{o}\sum_{\substack{i,j,u,v:\\ Si+u=a,\;Sj+v=b}} G_Y[n,o,i,j]\;\mathcal W[o,c,u,v],
+\]
+and $G_X$ is $G_{\tilde X}$ with the $P$-pixel border cropped off. This is a ``full'' convolution of $G_Y$ (with zeros inserted between entries when $S=2$) with the $180^\circ$-rotated kernel, with the in/out channel roles swapped. It is exactly what \code{conv\_transpose2d} computes.
+\end{idea}
+
+\begin{idea}[the same thing in im2col form: two more matrix products]
+With $Y_\text{mat}=W_\text{mat}X_\text{col}$ (\cref{sec:im2col}) and $G_{Y_\text{mat}}\in\R^{C_\text{out}\times H_\text{out}W_\text{out}}$:
+\begin{align*}
+  G_{W_\text{mat}} &= \sum_n G_{Y_\text{mat}}^{(n)}\,X_\text{col}^{(n)\top}
+    && (C_\text{out}\times HW)(HW\times C_\text{in}K^2) = (C_\text{out}\times C_\text{in}K^2)\;\checkmark\\
+  G_{X_\text{col}} &= W_\text{mat}\T\,G_{Y_\text{mat}}
+    && (C_\text{in}K^2\times C_\text{out})(C_\text{out}\times HW) = (C_\text{in}K^2\times HW)\;\checkmark
+\end{align*}
+then \emph{col2im}: scatter-add each column of $G_{X_\text{col}}$ back into the $C_\text{in}\times K\times K$ window it came from. Overlapping windows add up, which is where the ``sum over windows containing the pixel'' comes from. These are exactly the linear-layer rules, with $X_\text{col}$ playing $P$ and $W_\text{mat}$ playing $W$.
+\end{idea}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.75]
+  \matr{0.8}{0.6}{3.6}{1.0}{cG}{$G_{Y_\text{mat}}$}{$C_\text{out}$}{$HW$}
+  \node at (4.8,1.1) {$\cdot$};
+  \matr{6.2}{-0.5}{2.2}{3.2}{c16}{$X_\text{col}\T$}{$HW$}{$C_\text{in}K^2$}
+  \node at (8.8,1.1) {$=$};
+  \matr{10.2}{0.6}{2.2}{1.0}{cG}{$G_{W_\text{mat}}$}{$C_\text{out}$}{$C_\text{in}K^2$}
+  \node[font=\scriptsize,right] at (12.6,1.1) {$\to$ reshape $(C_\text{out},C_\text{in},3,3)$};
+\end{tikzpicture}
+\end{center}
+
+\begin{shapebox}[conv gradients in this network]
+\begin{center}
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+conv & $X$ & $Y$ & $G_\mathcal W$ (= shape of $\mathcal W$) & $G_X$\\
+\midrule
+stem & \shp{N,3,32,32} & \shp{N,16,32,32} & \shp{16,3,3,3} & (not needed)\\
+stage-1 conv & \shp{N,16,32,32} & \shp{N,16,32,32} & \shp{16,16,3,3} & \shp{N,16,32,32}\\
+stage-2 first ($S{=}2$) & \shp{N,16,32,32} & \shp{N,32,16,16} & \shp{32,16,3,3} & \shp{N,16,32,32}\\
+stage-3 first ($S{=}2$) & \shp{N,32,16,16} & \shp{N,64,8,8} & \shp{64,32,3,3} & \shp{N,32,16,16}\\
+stage-3 conv & \shp{N,64,8,8} & \shp{N,64,8,8} & \shp{64,64,3,3} & \shp{N,64,8,8}\\
+\bottomrule
+\end{tabular}
+\end{center}
+The input image needs no gradient (\code{requires\_grad=False}), so autograd skips $G_X$ for the stem. A stride-2 conv's $G_X$ is back at the \emph{larger} resolution: back-propagation undoes the downsampling.
+\end{shapebox}
+
+\subsection{One whole block backwards}
+
+\begin{repo}[gradient flow through \texttt{BasicBlock.forward}, reversed]
+Given $G_y$ (shape of the block output):
+\begin{align*}
+  G_u &= G_y\odot\mathbb 1[u>0] && u=\mathcal F(x)+s(x)\\
+  G_{b_2} &= G_u && \text{(add: copy to branch)}\\
+  G_{a_2},\,G_{\gamma_2},\,G_{\beta_2} &= \text{BN-backward}(G_{b_2}) && \text{\cref{sec:bnback}}\\
+  G_{r_1},\,G_{\mathcal W_2} &= \text{conv-backward}(G_{a_2}) && \text{\cref{sec:convback}}\\
+  G_{b_1} &= G_{r_1}\odot\mathbb 1[b_1>0]\\
+  G_{a_1},\,G_{\gamma_1},\,G_{\beta_1} &= \text{BN-backward}(G_{b_1})\\
+  G_x^{\text{branch}},\,G_{\mathcal W_1} &= \text{conv-backward}(G_{a_1}) && \text{(stride $S$)}\\
+  G_x &= G_x^{\text{branch}} + \begin{cases}G_u & \text{identity shortcut}\\ \text{scatter}\big(G_u[:,\,p{:}p{+}C_\text{in}]\big) & \text{option A}\\ 0 & \text{plain}\end{cases}
+\end{align*}
+where $p=(C_\text{out}-C_\text{in})/2$ is the number of padded channels on each side (8 or 16).
+\code{loss.backward()} does all of this automatically, for all 9 blocks, the stem and the head. Afterwards every parameter's \code{.grad} holds $G_\theta$ with \code{.grad.shape == param.shape}: this was checked for every parameter, e.g.\ \code{stage2.0.first\_conv.weight} \shp{32,16,3,3}, \code{linear.weight} \shp{10,64}, \code{bn1.weight} \shp{16}.
+\end{repo}
+
+\begin{warn}[what \texttt{train\_step} does around backward]
+\begin{lstlisting}[firstnumber=4]
+def train_step(model,x,y,optimizer,loss_fn):
+    optimizer.zero_grad()
+    logits = model(x)
+    loss = loss_fn(logits,y)
+    loss.backward()
+    optimizer.step()
+    return logits.detach(), loss.item()
+\end{lstlisting}
+PyTorch \emph{accumulates} into \code{.grad}, so \code{zero\_grad()} must come first. In PyTorch 2.x it sets \code{.grad} to \code{None} (the default \code{set\_to\_none=True}) rather than filling with zeros. The returned logits are those of the forward pass \emph{before} the update, detached from the graph, and they are what the epoch's training accuracy is computed from (\cref{sec:loop}). \code{loss.item()} copies the scalar to the CPU, which synchronises with the GPU once per step.
+\end{warn}
